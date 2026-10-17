@@ -44,3 +44,10 @@ class ExperimentConfig(StrictModel):
     model: ModelConfig
     task: TaskConfig
     optim: OptimConfig = Field(default_factory=OptimConfig)
+
+class RuntimeConfig(StrictModel):
+    """Everything about WHERE and HOW it runs. Never hashed."""
+    
+    output_dir: str = "runs"
+    worker_name: str = "local"
+    log_level: Literal["DEBUG", "INFO", "WARNING"] = "INFO"

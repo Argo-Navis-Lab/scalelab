@@ -9,11 +9,6 @@ dependencies = [
     "pyyaml>=6.0.3",
 ]
 
-[tool.uv.workspace]
-members = [
-    "scalelab",
-]
-
 [tool.hatch.build.targets.wheel]
 packages = ["src/scalelab"]
 
@@ -28,3 +23,8 @@ build-backend = "hatchling.build"
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.pytest]
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib"]
+strict = true

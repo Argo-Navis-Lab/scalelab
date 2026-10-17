@@ -36,3 +36,11 @@ class TaskConfig(StrictModel):
 class OptimConfig(StrictModel):
     lr: float = Field(default=3e-4, gt=0)
     weight_decay: float = Field(default=0.0, ge=0)
+
+class ExperimentConfig(StrictModel):
+    """Everything that defines WHAT the experiment is."""
+    
+    name: str
+    model: ModelConfig
+    task: TaskConfig
+    optim: OptimConfig = Field(default_factory=OptimConfig)

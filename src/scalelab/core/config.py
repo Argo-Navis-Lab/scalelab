@@ -25,3 +25,6 @@ class ModelConfig(StrictModel):
                 f"d_model ({self.d_model}) must be divisible by n_heads({self.n_heads})"
             )
         return self
+    @property
+    def head_dim(self) -> int:
+        return self.d_model // self.n_heads

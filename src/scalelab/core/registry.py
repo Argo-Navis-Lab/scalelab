@@ -25,6 +25,7 @@ from sqlalchemy import (
 from scalelab.core import hashing
 from scalelab.core.config import ExperimentConfig, StrictModel, load_config
 from scalelab.core.envcapture import EnvInfo, capture_env
+from scalelab.core.storage import registry_path
 
 RunStatus = Literal["running", "done", "failed"]
 
@@ -215,7 +216,7 @@ class Registry:
 
 if __name__ == "__main__":
     seed = int(sys.argv[1]) if len(sys.argv) > 1 else 0
-    registry = Registry.sqlite("runs/registry.db")
+    registry = Registry.sqlite(registry_path())
     run_id = registry.add_run(load_config("configs/experiments/hello.yaml"), seed, capture_env())
     registry.finish_run(run_id, "done")  # a dummy job: nothing to train yet
     print(registry.get_run(run_id).model_dump_json(indent=2, exclude={"env_json"}))

@@ -13,3 +13,6 @@ dependencies = [
 members = [
     "scalelab",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scalelab"]

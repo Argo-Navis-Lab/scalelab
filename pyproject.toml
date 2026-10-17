@@ -16,3 +16,10 @@ members = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/scalelab"]
+
+[project.scripts]
+scalelab = "scalelab:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

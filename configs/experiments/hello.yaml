@@ -1,0 +1,9 @@
+name: hello
+model:
+  name: m1
+  n_layers: 4
+  d_model: 128
+  n_heads: 2
+task:
+  name: arithmetic
+  max_digits: 4

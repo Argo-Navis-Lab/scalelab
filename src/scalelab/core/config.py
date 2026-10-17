@@ -32,3 +32,7 @@ class ModelConfig(StrictModel):
 class TaskConfig(StrictModel):
     name: Literal["arithmetic", "countdown"]
     max_digits: int = Field(default= 4, ge=2, le=12)
+
+class OptimConfig(StrictModel):
+    lr: float = Field(default=3e-4, gt=0)
+    weight_decay: float = Field(default=0.0, ge=0)

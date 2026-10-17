@@ -28,3 +28,7 @@ class ModelConfig(StrictModel):
     @property
     def head_dim(self) -> int:
         return self.d_model // self.n_heads
+
+class TaskConfig(StrictModel):
+    name: Literal["arithmetic", "countdown"]
+    max_digits: int = Field(default= 4, ge=2, le=12)

@@ -51,3 +51,10 @@ class RuntimeConfig(StrictModel):
     output_dir: str = "runs"
     worker_name: str = "local"
     log_level: Literal["DEBUG", "INFO", "WARNING"] = "INFO"
+
+def load_config(path: str | Path) -> ExperimentConfig:
+    """Read a YAML file and validate it into an ExperimentConfig."""
+    
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+    return ExperimentConfig.model_validate(raw)

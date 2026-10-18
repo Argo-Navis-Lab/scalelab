@@ -1,4 +1,4 @@
-"""Config validation tests (blueprint Section 4.1)."""
+"""Config validation tests."""
 
 from pathlib import Path
 

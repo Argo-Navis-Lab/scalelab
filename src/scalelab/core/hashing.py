@@ -1,4 +1,4 @@
-"""Run identity: config -> canonical JSON -> config_hash -> run_id (blueprint Section 4.1)."""
+"""Run identity: config -> canonical JSON -> config_hash -> run_id."""
 
 import hashlib
 import json

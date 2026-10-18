@@ -17,7 +17,7 @@ def test_stop_and_resume_is_bit_identical(tmp_path):
     uninterrupted = run_dummy_job(0, STEPS, tmp_path / "a", home=tmp_path)
 
     before = run_dummy_job(0, STEPS, tmp_path / "b", home=tmp_path, stop_after=20)
-    assert latest_checkpoint(tmp_path / "b").name == "step-000000020.json"
+    assert latest_checkpoint(tmp_path / "b") == tmp_path / "b" / "step-000000020.json"
     after = run_dummy_job(0, STEPS, tmp_path / "b", home=tmp_path)  # a "new session"
 
     assert len(before) == 20 and len(after) == 30

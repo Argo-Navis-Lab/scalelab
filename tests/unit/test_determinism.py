@@ -115,7 +115,7 @@ def test_deterministic_mode_off():
 
 
 @pytest.mark.parametrize(("has_gpu", "expected"), [(False, True), (True, False)])
-def test_default_is_on_for_cpu_and_off_for_gpu(monkeypatch, has_gpu, expected):
+def test_default_is_on_for_cpu_and_off_for_gpu(monkeypatch, has_gpu: bool, expected: bool):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: has_gpu)
     seed_everything(0)  # deterministic not given: use the default
     assert torch.are_deterministic_algorithms_enabled() is expected

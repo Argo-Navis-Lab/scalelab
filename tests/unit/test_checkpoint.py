@@ -102,7 +102,7 @@ def test_model_and_optimizer_round_trip(tmp_path):
         assert torch.equal(before["exp_avg_sq"], after["exp_avg_sq"])
 
 
-def draw_everything(data_rng: np.random.Generator) -> tuple:
+def draw_everything(data_rng: np.random.Generator) -> tuple[float, ...]:
     return (random.random(), np.random.rand(), torch.rand(1).item(), data_rng.random())
 
 
@@ -144,13 +144,13 @@ def test_latest_checkpoint_is_the_highest_step(tmp_path):
     for step in (5, 100, 20):
         save_checkpoint(tmp_path / "ckpt", step, {}, home=tmp_path)
     # Zero-padding matters: as plain text, "100" would sort before "20" and "5".
-    assert latest_checkpoint(tmp_path / "ckpt").name == "step-000000100.json"
+    assert latest_checkpoint(tmp_path / "ckpt") == tmp_path / "ckpt" / "step-000000100.json"
 
 
 def test_latest_checkpoint_ignores_half_written_files(tmp_path):
     save_checkpoint(tmp_path / "ckpt", 5, {}, home=tmp_path)
     (tmp_path / "ckpt" / "step-000000010.json.tmp").write_text('{"half')
-    assert latest_checkpoint(tmp_path / "ckpt").name == "step-000000005.json"
+    assert latest_checkpoint(tmp_path / "ckpt") == tmp_path / "ckpt" / "step-000000005.json"
 
 
 def test_no_checkpoint_yet(tmp_path):

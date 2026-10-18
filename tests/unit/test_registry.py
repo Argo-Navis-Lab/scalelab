@@ -44,7 +44,7 @@ def registry(tmp_path) -> Registry:
 
 def count_rows(registry: Registry, table) -> int:
     with registry.engine.connect() as conn:
-        return conn.execute(select(func.count()).select_from(table)).scalar()
+        return conn.execute(select(func.count()).select_from(table)).scalar_one()
 
 
 # --- creating and reopening --------------------------------------------------------

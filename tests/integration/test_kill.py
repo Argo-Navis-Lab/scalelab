@@ -12,7 +12,7 @@ from scalelab.core.dummy_job import run_dummy_job
 STEPS = 50
 
 
-def start_job(home: Path) -> subprocess.Popen:
+def start_job(home: Path) -> subprocess.Popen[str]:
     """Start the dummy job in a separate process: a checkpoint every 5 steps, 0.05 s a step."""
     command = [sys.executable, "-m", "scalelab.core.dummy_job", str(home)]
     command += ["--every-steps", "5", "--step-seconds", "0.05"]
@@ -24,10 +24,11 @@ def saved_step(home: Path) -> int:
     return 0 if latest is None else int(latest.stem.removeprefix("step-"))
 
 
-def wait_until_saved(job: subprocess.Popen, home: Path, step: int) -> None:
+def wait_until_saved(job: subprocess.Popen[str], home: Path, step: int) -> None:
     deadline = time.monotonic() + 60
     while saved_step(home) < step:
         if job.poll() is not None:
+            assert job.stdout is not None  # start_job asked for it with stdout=PIPE
             raise RuntimeError(f"the job ended too early:\n{job.stdout.read()}")
         if time.monotonic() > deadline:
             raise TimeoutError(f"no checkpoint at step {step} after 60 seconds")

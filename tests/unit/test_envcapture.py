@@ -58,6 +58,7 @@ def test_edited_file_makes_repo_dirty(git_repo):
     (git_repo / "train.py").write_text("lr = 0.2\n")
     info = capture_git(git_repo)
     assert info.dirty is True
+    assert info.diff_sha256
     assert re.fullmatch(r"[0-9a-f]{64}", info.diff_sha256)
 
 
@@ -73,7 +74,7 @@ def test_ignored_files_do_not_make_repo_dirty(git_repo):
 
 
 def test_diff_hash_identifies_the_change(git_repo):
-    def diff_hash_after_writing(text: str) -> str:
+    def diff_hash_after_writing(text: str) -> str | None:
         (git_repo / "train.py").write_text(text)
         return capture_git(git_repo).diff_sha256
 

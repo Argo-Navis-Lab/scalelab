@@ -38,6 +38,7 @@ def test_one_command_records_a_complete_run_row(home, capsys):
     assert run.deterministic is True  # tests run on CPUs, where it is on by default
     assert run.executor == "local"
     assert run.hardware == "cpu"
+    assert run.ended_at is not None
     assert run.started_at <= run.ended_at
     assert EnvInfo.model_validate_json(run.env_json).git.sha.startswith(run.run_id[-8:])
     assert registry.experiment_json(run.config_hash) is not None
@@ -94,6 +95,7 @@ def test_interrupted_run_resumes_to_the_same_result(home, tmp_path, capsys, monk
         stderr=subprocess.STDOUT,
         text=True,
     )
+    assert job.stdout is not None  # we asked for it with stdout=subprocess.PIPE
     for line in job.stdout:  # wait until the run is recorded and training
         if line.startswith("started"):
             break

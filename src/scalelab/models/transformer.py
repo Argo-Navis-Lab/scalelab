@@ -1,5 +1,7 @@
 """The Track S transformer: token ids in, a score for every possible next token out."""
 
+from typing import cast
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -8,6 +10,7 @@ from scalelab.core.config import ModelConfig
 from scalelab.models.attention.base import Attention
 from scalelab.models.attention.mha import MultiHeadAttention
 from scalelab.models.init import init_weights
+from scalelab.models.kvcache import KVCache, LayerCache
 from scalelab.models.norms import RMSNorm
 from scalelab.models.rope import RotaryEmbedding
 from scalelab.tasks.tokenizer import VOCAB_SIZE
@@ -45,6 +48,11 @@ class Block(nn.Module):
         x = x + self.attn(self.attn_norm(x), rope, positions)
         return x + self.mlp(self.mlp_norm(x))
 
+    def decode(self, x: Tensor, rope: RotaryEmbedding, cache: LayerCache, start: int) -> Tensor:
+        """Like forward, for new tokens at positions start, start + 1, ..., using the cache."""
+        x = x + self.attn.decode(self.attn_norm(x), rope, cache, start)
+        return x + self.mlp(self.mlp_norm(x))
+
 
 class Transformer(nn.Module):
     """Embedding, n_layers blocks, a final RMSNorm, and the output head."""
@@ -71,6 +79,29 @@ class Transformer(nn.Module):
             x = block(x, self.rope, positions)
         return self.head(self.norm(x))
 
+    def new_cache(self, batch: int) -> KVCache:
+        """An empty KV cache for `batch` sequences of up to `context` tokens, in the model's
+        own dtype and on its device."""
+        weight = self.embed.weight
+        layers = [
+            block.attn.new_cache(batch, self.config.context, weight.dtype, weight.device)
+            for block in self._typed_blocks()
+        ]
+        return KVCache(layers, self.config.context)
+
+    def decode(self, tokens: Tensor, cache: KVCache) -> Tensor:
+        """Logits for new tokens that follow the ones already in the cache: the first call
+        reads a prompt, each later call the token just generated. The logits equal what
+        forward() gives for the whole sequence, without recomputing earlier positions."""
+        start, n = cache.length, tokens.shape[1]
+        if start + n > cache.max_len:
+            raise ValueError(f"the cache holds {cache.max_len} tokens; {start + n} don't fit")
+        x = self.embed(tokens)
+        for block, layer in zip(self._typed_blocks(), cache.layers, strict=True):
+            x = block.decode(x, self.rope, layer, start)
+        cache.length = start + n
+        return self.head(self.norm(x))
+
     def num_parameters(self, embeddings: bool = False) -> int:
         """N, the size the scaling fits use: every parameter except the embedding and the
         head, which are tiny here (64 rows each). embeddings=True counts everything."""
@@ -78,6 +109,11 @@ class Transformer(nn.Module):
         if embeddings:
             return total
         return total - self.embed.weight.numel() - self.head.weight.numel()
+
+    def _typed_blocks(self) -> list[Block]:
+        """The blocks, as Blocks: an nn.ModuleList only tells pyright it holds some Module.
+        cast() changes nothing when the code runs; it just states what we know."""
+        return [cast(Block, block) for block in self.blocks]
 
 
 def make_attention(config: ModelConfig) -> Attention:

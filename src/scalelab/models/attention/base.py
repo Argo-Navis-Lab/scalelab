@@ -2,9 +2,11 @@
 
 from abc import ABC, abstractmethod
 
+import torch
 from torch import Tensor, nn
 
 from scalelab.core.config import StrictModel
+from scalelab.models.kvcache import LayerCache
 from scalelab.models.rope import RotaryEmbedding
 
 
@@ -32,5 +34,17 @@ class Attention(nn.Module, ABC):
         """
 
     @abstractmethod
+    def decode(self, x: Tensor, rope: RotaryEmbedding, cache: LayerCache, start: int) -> Tensor:
+        """Attention for new tokens at positions start, start + 1, ..., using the cache for
+        every earlier position, and storing the new tokens' keys and values in it. Reading a
+        whole prompt (start 0) and generating one token at a time both go through here."""
+
+    @abstractmethod
+    def new_cache(
+        self, batch: int, max_len: int, dtype: torch.dtype, device: torch.device
+    ) -> LayerCache:
+        """An empty cache for this layer, with room for max_len positions."""
+
+    @abstractmethod
     def cache_spec(self) -> CacheSpec:
-        """What this layer would keep per token in a KV cache (used from step 13 on)."""
+        """What this layer keeps per token in its cache: new_cache's tensors must match it."""

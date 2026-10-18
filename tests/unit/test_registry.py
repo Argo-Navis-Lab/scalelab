@@ -17,7 +17,13 @@ from scalelab.core.envcapture import (
     capture_env,
 )
 from scalelab.core.hashing import canonical_json, config_hash
-from scalelab.core.registry import Registry, RunExistsError, experiments, runs
+from scalelab.core.registry import (
+    OutdatedRegistryError,
+    Registry,
+    RunExistsError,
+    experiments,
+    runs,
+)
 
 
 @pytest.fixture
@@ -192,3 +198,39 @@ def test_foreign_keys_are_enforced(registry, env):
     with pytest.raises(IntegrityError, match="FOREIGN KEY"):
         with registry.engine.begin() as conn:
             conn.execute(insert(runs).values(**orphan))
+
+
+
+# --- added in Step 12: the deterministic flag, resuming, and old registry files --------
+
+
+def test_deterministic_flag_is_recorded(registry, config, env):
+    run_id = registry.add_run(config, seed=0, env=env, deterministic=True)
+    assert registry.get_run(run_id).deterministic is True
+
+
+@pytest.mark.parametrize("status", ["running", "failed"])
+def test_reopen_an_unfinished_run(registry, config, env, status):
+    run_id = registry.add_run(config, seed=0, env=env)
+    if status == "failed":
+        registry.finish_run(run_id, "failed")
+    registry.reopen_run(run_id)
+    run = registry.get_run(run_id)
+    assert run.status == "running"
+    assert run.ended_at is None
+
+
+def test_a_done_run_cannot_be_reopened(registry, config, env):
+    run_id = registry.add_run(config, seed=0, env=env)
+    registry.finish_run(run_id, "done")
+    with pytest.raises(ValueError, match="no unfinished run"):
+        registry.reopen_run(run_id)
+
+
+def test_registry_from_an_older_version_is_reported(tmp_path):
+    path = tmp_path / "registry.db"
+    old = Registry.sqlite(path)
+    with old.engine.begin() as conn:
+        conn.exec_driver_sql("ALTER TABLE runs DROP COLUMN deterministic")  # make it "old"
+    with pytest.raises(OutdatedRegistryError, match=r"missing the columns \['deterministic'\]"):
+        Registry.sqlite(path)

@@ -1,0 +1,4 @@
+name: m5
+n_layers: 12
+d_model: 640
+n_heads: 10

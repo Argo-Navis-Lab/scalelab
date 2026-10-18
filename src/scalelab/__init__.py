@@ -1,3 +1,1 @@
-def main() -> None:
-    print("Hello from scalelab!")
-
+"""ScaleLab: a Small-Scale Reinforcement Learning Scaling Lab. The `scalelab` command lives in scalelab.cli."""

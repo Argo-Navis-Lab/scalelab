@@ -1,9 +1,6 @@
+# The smallest experiment: model m1 on 4-digit arithmetic.
+defaults:
+  - model: ladder_s/m1
+  - task: arithmetic
+
 name: hello
-model:
-  name: m1
-  n_layers: 4
-  d_model: 128
-  n_heads: 2
-task:
-  name: arithmetic
-  max_digits: 4

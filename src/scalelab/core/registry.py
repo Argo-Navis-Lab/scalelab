@@ -1,6 +1,5 @@
 """Run registry: one database row per experiment and per run."""
 
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -18,14 +17,14 @@ from sqlalchemy import (
     create_engine,
     event,
     insert,
+    inspect,
     select,
     update,
 )
 
 from scalelab.core import hashing
-from scalelab.core.config import ExperimentConfig, StrictModel, load_config
-from scalelab.core.envcapture import EnvInfo, capture_env
-from scalelab.core.storage import registry_path
+from scalelab.core.config import ExperimentConfig, StrictModel
+from scalelab.core.envcapture import EnvInfo
 
 RunStatus = Literal["running", "done", "failed"]
 
@@ -59,6 +58,7 @@ runs = Table(
     Column("status", String, nullable=False),
     Column("executor", String, nullable=False),
     Column("hardware", String, nullable=False),
+    Column("deterministic", Boolean, nullable=False, default=False),
     Column("started_at", DateTime(timezone=True), nullable=False),
     Column("ended_at", DateTime(timezone=True)),  # empty until the run finishes
     Column("env_json", Text, nullable=False),
@@ -76,9 +76,14 @@ class RunRecord(StrictModel):
     status: RunStatus
     executor: str
     hardware: str
+    deterministic: bool
     started_at: datetime
     ended_at: datetime | None
     env_json: str
+
+
+class OutdatedRegistryError(Exception):
+    """The registry file was created by an older ScaleLab whose tables had fewer columns."""
 
 
 class RunExistsError(Exception):
@@ -114,6 +119,19 @@ def _to_record(row) -> RunRecord:
     return RunRecord.model_validate(data)
 
 
+def _check_schema(engine) -> None:
+    """create_all never changes an existing table, so catch out-of-date tables right away."""
+    inspector = inspect(engine)
+    for table in metadata.sorted_tables:
+        found = {column["name"] for column in inspector.get_columns(table.name)}
+        missing = [column.name for column in table.columns if column.name not in found]
+        if missing:
+            raise OutdatedRegistryError(
+                f"the registry's {table.name!r} table is missing the columns {missing}: "
+                f"it was created by an older version of ScaleLab ({engine.url.database})"
+            )
+
+
 def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
     """SQLite ignores foreign keys unless each new connection switches them on."""
     cursor = dbapi_connection.cursor()
@@ -132,6 +150,7 @@ class Registry:
         if self.engine.dialect.name == "sqlite":
             event.listen(self.engine, "connect", _enable_sqlite_foreign_keys)
         metadata.create_all(self.engine)  # creates missing tables; leaves existing ones alone
+        _check_schema(self.engine)
 
     @classmethod
     def sqlite(cls, path: str | Path) -> "Registry":
@@ -141,7 +160,12 @@ class Registry:
         return cls(f"sqlite:///{path}")
 
     def add_run(
-        self, config: ExperimentConfig, seed: int, env: EnvInfo, executor: str = "local"
+        self,
+        config: ExperimentConfig,
+        seed: int,
+        env: EnvInfo,
+        executor: str = "local",
+        deterministic: bool = False,
     ) -> str:
         """Record a new run as 'running' (and its experiment, if new). Returns the run_id."""
         run_id = hashing.run_id(config, seed, env.git.sha)
@@ -173,6 +197,7 @@ class Registry:
                     status="running",
                     executor=executor,
                     hardware=_hardware_label(env),
+                    deterministic=deterministic,
                     started_at=now,
                     ended_at=None,
                     env_json=env.model_dump_json(),
@@ -182,7 +207,7 @@ class Registry:
 
     def finish_run(self, run_id: str, status: RunStatus) -> None:
         """Mark a running run as 'done' or 'failed' and stamp its end time."""
-        if status not in ("done", "failed"): 
+        if status not in ("done", "failed"):
             raise ValueError(f"a run can only finish as 'done' or 'failed', not {status!r}")
         with self.engine.begin() as conn:
             result = conn.execute(
@@ -192,6 +217,17 @@ class Registry:
             )
             if result.rowcount == 0:
                 raise ValueError(f"no running run with id {run_id}")
+
+    def reopen_run(self, run_id: str) -> None:
+        """Mark an interrupted or failed run as running again, because it is being resumed."""
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(runs)
+                .where(runs.c.run_id == run_id, runs.c.status != "done")
+                .values(status="running", ended_at=None)
+            )
+            if result.rowcount == 0:
+                raise ValueError(f"no unfinished run with id {run_id}")
 
     def get_run(self, run_id: str) -> RunRecord | None:
         with self.engine.connect() as conn:
@@ -212,11 +248,3 @@ class Registry:
             return conn.execute(
                 select(experiments.c.config_json).where(experiments.c.config_hash == config_hash)
             ).scalar()
-
-
-if __name__ == "__main__":
-    seed = int(sys.argv[1]) if len(sys.argv) > 1 else 0
-    registry = Registry.sqlite(registry_path())
-    run_id = registry.add_run(load_config("configs/experiments/hello.yaml"), seed, capture_env())
-    registry.finish_run(run_id, "done")  # a dummy job: nothing to train yet
-    print(registry.get_run(run_id).model_dump_json(indent=2, exclude={"env_json"}))

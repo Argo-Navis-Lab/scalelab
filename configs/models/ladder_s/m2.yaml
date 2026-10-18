@@ -1,0 +1,4 @@
+name: m2
+n_layers: 6
+d_model: 256
+n_heads: 4

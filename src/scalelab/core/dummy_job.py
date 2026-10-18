@@ -30,6 +30,7 @@ def run_dummy_job(
     stop_after: int | None = None,
     policy: CheckpointPolicy | None = None,
     step_seconds: float = 0.0,
+    deterministic: bool = True,
 ) -> list[float]:
     """Train a small network to add up 8 numbers, resuming from a checkpoint if there is one.
 
@@ -39,7 +40,7 @@ def run_dummy_job(
     so demos and tests have time to interrupt it.
     """
     policy = policy or CheckpointPolicy()
-    seeds = seed_everything(seed, deterministic=True)
+    seeds = seed_everything(seed, deterministic)
     data_rng = np.random.default_rng(seeds.data)
     model = torch.nn.Sequential(torch.nn.Linear(8, 32), torch.nn.ReLU(), torch.nn.Linear(32, 1))
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)

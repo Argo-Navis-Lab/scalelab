@@ -17,7 +17,7 @@ dependencies = [
 packages = ["src/scalelab"]
 
 [project.scripts]
-scalelab = "scalelab:main"
+scalelab = "scalelab.cli:main"
 
 [build-system]
 requires = ["hatchling"]

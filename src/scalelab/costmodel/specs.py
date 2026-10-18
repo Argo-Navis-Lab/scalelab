@@ -31,6 +31,31 @@ class ParamCounts(StrictModel):
         return self.embedding + self.non_embedding + self.head
 
 
+class WorkloadSpec(StrictModel):
+    """What the model is asked to do, in a shape the cost model can count (Section 5.1).
+
+    Every phase processes `tokens` new tokens per sequence after `past` tokens already in the
+    KV cache: training and reading a prompt start from an empty cache, and generating adds
+    one token at a time.
+    """
+
+    phase: Literal["train", "prefill", "decode"]
+    batch: int = Field(gt=0)  # sequences processed together
+    tokens: int = Field(gt=0)  # new tokens per sequence
+    past: int = Field(default=0, ge=0)  # tokens already in the KV cache (decode only)
+    activation_ckpt: bool = False  # training only: redo the forward pass to save memory
+
+    @model_validator(mode="after")
+    def check_phase(self) -> "WorkloadSpec":
+        if self.phase == "decode" and self.tokens != 1:
+            raise ValueError("decode adds exactly one token per sequence")
+        if self.phase != "decode" and self.past != 0:
+            raise ValueError(f"{self.phase} starts from an empty cache, so past must be 0")
+        if self.activation_ckpt and self.phase != "train":
+            raise ValueError("activation checkpointing only applies to training")
+        return self
+
+
 class ModelSpec(StrictModel):
     """A model's shape, as the cost model sees it (blueprint Section 5.1)."""
 

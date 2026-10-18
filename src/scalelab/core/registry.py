@@ -138,7 +138,7 @@ def _check_schema(engine: Engine) -> None:
 
 def _enable_sqlite_foreign_keys(
     dbapi_connection: DBAPIConnection, _connection_record: ConnectionPoolEntry
-    ) -> None:
+) -> None:
     """SQLite ignores foreign keys unless each new connection switches them on."""
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")

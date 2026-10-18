@@ -1,0 +1,36 @@
+# Runs on GitHub's computers after every push: the same four checks you run locally.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read # this workflow only reads the code
+
+jobs:
+  checks:
+    name: lint, types and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.0
+
+      - name: Install Python and the locked dependencies
+        run: uv sync --locked
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Formatting (ruff)
+        run: uv run ruff format --check .
+
+      - name: Types (pyright)
+        run: uv run pyright
+
+      - name: Tests (pytest)
+        run: uv run pytest

@@ -21,3 +21,8 @@ class Task[P](Protocol):
     def format_prompt(self, problem: P) -> list[int]:
         """The token ids the model reads before it starts to answer."""
         ...
+
+    def worked_solution(self, problem: P) -> str:
+        """What a perfect model writes after the prompt: its working, then "#" and the answer.
+        Warm-start training teaches the model to write exactly this, followed by <eos>."""
+        ...

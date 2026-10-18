@@ -67,3 +67,47 @@ class ArithmeticTask:
 
     def format_prompt(self, problem: ArithmeticProblem) -> list[int]:
         return [BOS, *encode(problem.question)]
+
+    def worked_solution(self, problem: ArithmeticProblem) -> str:
+        """Column by column from the right, the way it's done on paper. For 347+852= it is
+        "7+2+0=9,9;4+5+0=9,99;3+8+0=11,199;#1199".
+
+        Each step is a true equation: the column's digits, then the carry from the column
+        before, "=", the value, ",", then the result so far. The value's last digit joins the
+        front of the result, and the rest of the value is the next column's carry.
+        """
+        a, b, op = problem.a, problem.b, problem.op
+        steps: list[str] = []
+        negative = op == "-" and a < b
+        if negative:
+            steps.append("-")  # the answer is negative: work out b - a, then add the minus sign
+            a, b = b, a
+        xs, ys = _digits(a), _digits(b)
+        columns = len(xs) + len(ys) - 1 if op == "*" else max(len(xs), len(ys))
+        carry, result = 0, ""
+        for k in range(columns):
+            if op == "*":
+                # Column k collects every pair of digits whose positions add up to k.
+                pairs = [(xs[i], ys[k - i]) for i in range(len(xs)) if 0 <= k - i < len(ys)]
+                terms = "+".join(f"{x}*{y}" for x, y in pairs)
+                value = sum(x * y for x, y in pairs) + carry
+            else:
+                x, y = _digit(xs, k), _digit(ys, k)
+                terms = f"{x}{op}{y}"
+                value = (x + y if op == "+" else x - y) + carry
+            result = str(value % 10) + result
+            steps.append(f"{terms}{carry:+d}={value},{result}")
+            carry = value // 10  # Python rounds down, so a value of -1 gives digit 9, carry -1
+        answer = ((str(carry) if carry else "") + result).lstrip("0") or "0"
+        steps.append(f"#{'-' if negative else ''}{answer}")
+        return ";".join(steps)
+
+
+def _digits(n: int) -> list[int]:
+    """The digits of n, last digit first: 347 gives [7, 4, 3]."""
+    return [int(digit) for digit in reversed(str(n))]
+
+
+def _digit(digits: list[int], k: int) -> int:
+    """Digit k counting from the right, or 0 past the front of a shorter number."""
+    return digits[k] if k < len(digits) else 0

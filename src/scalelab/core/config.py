@@ -20,18 +20,28 @@ class ModelConfig(StrictModel):
     d_model: int = Field(gt=0)
     n_heads: int = Field(gt=0)
     attn: Literal["mha", "gqa", "mla", "swa"] = "mha"
+    context: int = Field(default=256, gt=0)  # the longest sequence the model reads, in tokens
+    qk_norm: bool = False  # normalize attention's queries and keys (off by default)
 
     @model_validator(mode="after")
-    def check_heads_divide_width(self) -> "ModelConfig":
+    def check_heads(self) -> "ModelConfig":
         if self.d_model % self.n_heads != 0:
             raise ValueError(
                 f"d_model ({self.d_model}) must be divisible by n_heads ({self.n_heads})"
             )
+        if self.head_dim % 2 != 0:
+            raise ValueError(f"head_dim ({self.head_dim}) must be even for rotary embeddings")
         return self
 
     @property
     def head_dim(self) -> int:
         return self.d_model // self.n_heads
+
+    @property
+    def d_ff(self) -> int:
+        """The SwiGLU MLP's hidden width: 8/3 of d_model, rounded up to a multiple of 32
+        (whole-number maths: dividing by 96 = 3 * 32 and rounding up)."""
+        return (8 * self.d_model + 95) // 96 * 32
 
 
 class TaskConfig(StrictModel):

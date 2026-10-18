@@ -31,8 +31,8 @@ def test_one_command_records_a_complete_run_row(home, capsys):
 
     registry = Registry.sqlite(home / "registry.db")
     (run,) = registry.list_runs()
-    assert run.run_id.startswith("3f7ffa68d30146bd-s3-")
-    assert run.config_hash == "3f7ffa68d30146bd"
+    assert run.run_id.startswith("bbf7148085e02220-s3-")
+    assert run.config_hash == "bbf7148085e02220"
     assert run.seed == 3
     assert run.status == "done"
     assert run.deterministic is True  # tests run on CPUs, where it is on by default
@@ -61,7 +61,7 @@ def test_runtime_settings_do_not_change_the_run(home, capsys):
 def test_overrides_make_a_different_experiment(home):
     main(["run", str(HELLO), "model=ladder_s/m2"])
     (run,) = Registry.sqlite(home / "registry.db").list_runs()
-    assert run.config_hash != "3f7ffa68d30146bd"
+    assert run.config_hash != "bbf7148085e02220"
 
 
 @pytest.mark.parametrize(

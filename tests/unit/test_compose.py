@@ -34,7 +34,9 @@ def configs(tmp_path):
 def test_hello_hash_is_pinned():
     # Golden value: composing hello from separate files must not change what it is.
     # If this changes, every past hello run becomes a different experiment. Say so loudly.
-    assert config_hash(load_config(HELLO)) == "3f7ffa68d30146bd"
+    # Changed on purpose in M1 step 12, when ModelConfig gained context and qk_norm
+    # (it was 3f7ffa68d30146bd).
+    assert config_hash(load_config(HELLO)) == "bbf7148085e02220"
 
 
 @pytest.mark.parametrize("name", ["m1", "m2", "m3", "m4", "m5", "m6", "m7"])

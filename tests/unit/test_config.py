@@ -1,6 +1,7 @@
 """Config validation tests."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -38,6 +39,12 @@ def test_d_model_must_be_divisible_by_n_heads(raw):
         ExperimentConfig.model_validate(raw)
 
 
+def test_head_dim_must_be_even(raw: dict[str, Any]):
+    raw["model"]["d_model"], raw["model"]["n_heads"] = 126, 2  # 63 numbers per head
+    with pytest.raises(ValidationError, match="must be even"):
+        ExperimentConfig.model_validate(raw)
+
+
 def test_typo_at_top_level_is_rejected(raw):
     raw["nmae"] = "oops"
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
@@ -62,6 +69,7 @@ def test_runtime_fields_cannot_sneak_into_experiment_config(raw):
         ("model", "n_layers", 0),
         ("model", "d_model", -128),
         ("model", "attn", "flash"),
+        ("model", "context", 0),
         ("task", "name", "chess"),
         ("task", "max_digits", 1),
         ("task", "max_digits", 13),

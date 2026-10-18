@@ -9,7 +9,7 @@ from scalelab.core.config import StrictModel
 ANSWER_MARK = "#"  # a completion ends with "#" and then its answer
 
 # Why a completion lost reward.
-Flag = Literal["no_answer", "several_answers", "malformed_answer", "wrong_answer"]
+Flag = Literal["no_answer", "several_answers", "malformed_answer", "wrong_numbers", "wrong_answer"]
 
 
 class Reward(StrictModel):

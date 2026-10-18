@@ -4,6 +4,8 @@ from typing import Protocol
 
 import numpy as np
 
+from scalelab.tasks.rewards import Reward
+
 
 class Task[P](Protocol):
     """A family of problems, such as arithmetic. P is the kind of problem the task makes.
@@ -25,4 +27,9 @@ class Task[P](Protocol):
     def worked_solution(self, problem: P) -> str:
         """What a perfect model writes after the prompt: its working, then "#" and the answer.
         Warm-start training teaches the model to write exactly this, followed by <eos>."""
+        ...
+
+    def score(self, problem: P, completion: str) -> Reward:
+        """How well a completion (the model's text after the prompt, without <eos>) answers
+        the problem. Nothing in the completion is ever run as code."""
         ...

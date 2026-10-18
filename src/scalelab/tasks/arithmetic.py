@@ -1,11 +1,13 @@
 """Multi-digit arithmetic: add, subtract or multiply two whole numbers."""
 
+import re
 from typing import Literal
 
 import numpy as np
 from pydantic import Field
 
 from scalelab.core.config import StrictModel
+from scalelab.tasks.rewards import Reward, read_answer
 from scalelab.tasks.tokenizer import BOS, encode
 
 Op = Literal["+", "-", "*"]
@@ -13,6 +15,10 @@ OPS: tuple[Op, ...] = ("+", "-", "*")
 
 MIN_DIGITS = 2  # the difficulty range: how many digits each of the two numbers has
 MAX_DIGITS = 12
+
+# A whole number written the way the worked solutions write it: plain digits 0-9, a minus
+# sign only in front of a non-zero number, and no leading zeros, "+", spaces or "_".
+_INTEGER = re.compile(r"0|-?[1-9][0-9]*")
 
 
 class ArithmeticProblem(StrictModel):
@@ -101,6 +107,19 @@ class ArithmeticTask:
         answer = ((str(carry) if carry else "") + result).lstrip("0") or "0"
         steps.append(f"#{'-' if negative else ''}{answer}")
         return ";".join(steps)
+
+    def score(self, problem: ArithmeticProblem, completion: str) -> Reward:
+        """Full marks only for exactly the right whole number after the one "#". The answer is
+        compared as text, never converted with int(): int() accepts " 1_199", "+1199" and
+        other digit alphabets, and crashes on numbers longer than 4300 digits."""
+        answer = read_answer(completion)
+        if isinstance(answer, Reward):
+            return answer  # no single answer to read
+        if not _INTEGER.fullmatch(answer):
+            return Reward(value=0.0, format=-1.0, parsed=answer, flags=("malformed_answer",))
+        if answer != str(problem.answer):
+            return Reward(value=0.0, format=0.0, parsed=answer, flags=("wrong_answer",))
+        return Reward(value=1.0, format=0.0, parsed=answer, flags=())
 
 
 def _digits(n: int) -> list[int]:

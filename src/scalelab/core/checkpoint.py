@@ -128,7 +128,6 @@ def latest_checkpoint(directory: str | Path) -> Path | None:
     return manifests[-1] if manifests else None
 
 
-
 # --- keeping only the newest checkpoints --------------------------------------------------
 
 

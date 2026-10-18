@@ -8,9 +8,11 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Engine,
     ForeignKey,
     Integer,
     MetaData,
+    RowMapping,
     String,
     Table,
     Text,
@@ -21,6 +23,8 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy.engine.interfaces import DBAPIConnection
+from sqlalchemy.pool import ConnectionPoolEntry
 
 from scalelab.core import hashing
 from scalelab.core.config import ExperimentConfig, StrictModel
@@ -111,15 +115,15 @@ def _hardware_label(env: EnvInfo) -> str:
     return gpus[0].name if len(gpus) == 1 else f"{len(gpus)}x {gpus[0].name}"
 
 
-def _to_record(row) -> RunRecord:
+def _to_record(row: RowMapping) -> RunRecord:
     """Turn a database row into a RunRecord, restoring the UTC timezone on timestamps."""
-    data = dict(row._mapping)
+    data = dict(row)
     data["started_at"] = _as_utc(data["started_at"])
     data["ended_at"] = _as_utc(data["ended_at"])
     return RunRecord.model_validate(data)
 
 
-def _check_schema(engine) -> None:
+def _check_schema(engine: Engine) -> None:
     """create_all never changes an existing table, so catch out-of-date tables right away."""
     inspector = inspect(engine)
     for table in metadata.sorted_tables:
@@ -132,7 +136,9 @@ def _check_schema(engine) -> None:
             )
 
 
-def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
+def _enable_sqlite_foreign_keys(
+    dbapi_connection: DBAPIConnection, _connection_record: ConnectionPoolEntry
+    ) -> None:
     """SQLite ignores foreign keys unless each new connection switches them on."""
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
@@ -231,7 +237,7 @@ class Registry:
 
     def get_run(self, run_id: str) -> RunRecord | None:
         with self.engine.connect() as conn:
-            row = conn.execute(select(runs).where(runs.c.run_id == run_id)).first()
+            row = conn.execute(select(runs).where(runs.c.run_id == run_id)).mappings().first()
         return None if row is None else _to_record(row)
 
     def list_runs(self, config_hash: str | None = None) -> list[RunRecord]:
@@ -240,7 +246,7 @@ class Registry:
         if config_hash is not None:
             query = query.where(runs.c.config_hash == config_hash)
         with self.engine.connect() as conn:
-            return [_to_record(row) for row in conn.execute(query)]
+            return [_to_record(row) for row in conn.execute(query).mappings()]
 
     def experiment_json(self, config_hash: str) -> str | None:
         """The canonical JSON stored for an experiment, or None if it isn't registered."""

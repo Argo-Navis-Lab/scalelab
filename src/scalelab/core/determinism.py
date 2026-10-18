@@ -32,7 +32,7 @@ def derive_seeds(seed: int) -> Seeds:
     children = np.random.SeedSequence(seed).spawn(len(STREAMS))
     # 63 bits: big enough to never collide in practice, small enough for any database integer.
     values = [int(child.generate_state(1, dtype=np.uint64)[0] >> 1) for child in children]
-    return Seeds(root=seed, **dict(zip(STREAMS, values)))
+    return Seeds(root=seed, **dict(zip(STREAMS, values, strict=False)))
 
 
 def default_deterministic() -> bool:

@@ -96,7 +96,8 @@ def test_model_and_optimizer_round_trip(tmp_path):
     fresh_model.load_state_dict(loaded["model"])
     fresh_optimizer.load_state_dict(loaded["optimizer"])
     assert torch.equal(fresh_model.weight, model.weight)
-    for before, after in zip(optimizer.state.values(), fresh_optimizer.state.values()):
+    pairs = zip(optimizer.state.values(), fresh_optimizer.state.values(), strict=True)
+    for before, after in pairs:
         assert torch.equal(before["exp_avg"], after["exp_avg"])
         assert torch.equal(before["exp_avg_sq"], after["exp_avg_sq"])
 

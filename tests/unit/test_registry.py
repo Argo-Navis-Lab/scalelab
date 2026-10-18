@@ -200,7 +200,6 @@ def test_foreign_keys_are_enforced(registry, env):
             conn.execute(insert(runs).values(**orphan))
 
 
-
 # --- added in Step 12: the deterministic flag, resuming, and old registry files --------
 
 

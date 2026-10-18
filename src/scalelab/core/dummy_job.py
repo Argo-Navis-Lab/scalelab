@@ -3,16 +3,19 @@
 It does what every real run must do: seed everything, train, checkpoint, and resume.
 """
 
-import sys
+import argparse
+import time
 from pathlib import Path
 
 import numpy as np
 import torch
 
 from scalelab.core.checkpoint import (
+    CheckpointPolicy,
     capture_rng,
     latest_checkpoint,
     load_checkpoint,
+    prune_checkpoints,
     restore_rng,
     save_checkpoint,
 )
@@ -25,12 +28,17 @@ def run_dummy_job(
     checkpoint_dir: str | Path,
     home: Path | None = None,
     stop_after: int | None = None,
+    policy: CheckpointPolicy | None = None,
+    step_seconds: float = 0.0,
 ) -> list[float]:
     """Train a small network to add up 8 numbers, resuming from a checkpoint if there is one.
 
-    Returns the loss of every step this call ran. `stop_after=k` pretends the job is
-    interrupted: it saves a checkpoint after step k and returns early.
+    Returns the loss of every step this call ran. Saving follows `policy` (by default: every
+    15 minutes, keeping 2). `stop_after=k` pretends the job is interrupted after step k: it
+    saves and returns early, just as a SIGTERM would. `step_seconds` makes each step slower,
+    so demos and tests have time to interrupt it.
     """
+    policy = policy or CheckpointPolicy()
     seeds = seed_everything(seed, deterministic=True)
     data_rng = np.random.default_rng(seeds.data)
     model = torch.nn.Sequential(torch.nn.Linear(8, 32), torch.nn.ReLU(), torch.nn.Linear(32, 1))
@@ -54,8 +62,11 @@ def run_dummy_job(
         loss.backward()
         optimizer.step()
         losses.append(loss.item())
+        time.sleep(step_seconds)
 
         if step == stop_after:
+            policy.request_stop()
+        if policy.due(step):
             state = {
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
@@ -63,13 +74,31 @@ def run_dummy_job(
                 "rng": capture_rng(),
             }
             save_checkpoint(checkpoint_dir, step, state, home)
-            break
+            prune_checkpoints(checkpoint_dir, policy.keep, home)
+            policy.saved()
+            if policy.stop_requested:
+                break
     return losses
 
 
 if __name__ == "__main__":
-    # Demo: python -m scalelab.core.dummy_job <folder> [stop_after]
-    home = Path(sys.argv[1])
-    stop = int(sys.argv[2]) if len(sys.argv) > 2 else None
-    losses = run_dummy_job(0, 50, home / "checkpoints", home=home, stop_after=stop)
-    print(f"ran {len(losses)} steps; last loss {losses[-1]!r}")
+    parser = argparse.ArgumentParser(description="Run the dummy training job (seed 0).")
+    parser.add_argument("home", type=Path, help="folder for its checkpoints and artifacts")
+    parser.add_argument("--steps", type=int, default=50)
+    parser.add_argument("--every-steps", type=int, default=None, help="also save every N steps")
+    parser.add_argument("--step-seconds", type=float, default=0.0, help="slow each step down")
+    args = parser.parse_args()
+
+    policy = CheckpointPolicy(every_steps=args.every_steps)
+    policy.stop_on_signals()
+    losses = run_dummy_job(
+        0,
+        args.steps,
+        args.home / "checkpoints",
+        home=args.home,
+        policy=policy,
+        step_seconds=args.step_seconds,
+    )
+    how = "stopped early, checkpoint saved" if policy.stop_requested else "finished"
+    last = losses[-1] if losses else None
+    print(f"ran {len(losses)} steps ({how}); last loss {last!r}")

@@ -236,10 +236,13 @@ def test_registry_from_an_older_version_is_reported(tmp_path):
     with pytest.raises(OutdatedRegistryError, match=r"missing the columns \['deterministic'\]"):
         Registry.sqlite(path)
 
+
 # --- added in m1s21: eval results ------------------------------------------------
 
+
 def graded(
-    run_id: str, step: int = 100, task: str = "arithmetic-2", value: float = 0.5) -> EvalRecord:
+    run_id: str, step: int = 100, task: str = "arithmetic-2", value: float = 0.5
+) -> EvalRecord:
     """One greedy pass@1 result on 1000 problems, for the tests to store."""
     return EvalRecord(
         run_id=run_id,

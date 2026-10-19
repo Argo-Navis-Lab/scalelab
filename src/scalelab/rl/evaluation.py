@@ -2,7 +2,7 @@
 
 import math
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import torch
 from torch import Tensor
@@ -70,6 +70,30 @@ def evaluate[P](model: Transformer, task: Task[P], problems: Sequence[P], name: 
         if task.score(problem, text).value == 1.0:
             passed += 1
     return EvalResult(name=name, n=len(problems), passed=passed)
+
+
+def evaluate_by[P](
+    model: Transformer,
+    task: Task[P],
+    problems: Sequence[P],
+    name: str,
+    key: Callable[[P], str],
+) -> list[EvalResult]:
+    """Greedy pass@1 of a whole eval set, then of each part of it. `key` labels every problem,
+    and the problems with the same label make one part, named "<name>/<label>". Split by
+    operation, arithmetic-5 gives "arithmetic-5", then "arithmetic-5/*", "arithmetic-5/+" and
+    "arithmetic-5/-" (parts in the sorted order of their labels).
+
+    Each problem is answered once, in its part; the whole set's counts are the parts' counts
+    added up.
+    """
+    parts: dict[str, list[P]] = defaultdict(list)  # label -> the problems it labels
+    for problem in problems:
+        parts[key(problem)].append(problem)
+    results = [evaluate(model, task, parts[label], f"{name}/{label}") for label in sorted(parts)]
+    n = sum(result.n for result in results)
+    passed = sum(result.passed for result in results)
+    return [EvalResult(name=name, n=n, passed=passed), *results]
 
 
 def _generate_batch(model: Transformer, prompts: list[Sequence[int]]) -> list[list[int]]:

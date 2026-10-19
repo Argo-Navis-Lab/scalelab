@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from torch import Tensor
 
 from scalelab.core.config import SamplingParams
-from scalelab.rl.sampling import NEVER_WRITTEN, log_probs, sample
+from scalelab.rl.sampling import NEVER_WRITTEN, log_probs, nucleus, sample
 from scalelab.tasks.tokenizer import PAD, VOCAB_SIZE, encode
 
 THREE = encode("012")  # the token ids of "0", "1" and "2"
@@ -26,9 +26,11 @@ def three_way(p: list[float]) -> Tensor:
     return logits
 
 
-def frequencies(logits: Tensor, temperature: float, draws: int = 20_000) -> list[float]:
+def frequencies(
+    logits: Tensor, temperature: float, top_p: float = 1.0, draws: int = 20_000
+) -> list[float]:
     """How often "0", "1" and "2" come up in `draws` draws from the same logits."""
-    params = SamplingParams(temperature=temperature)
+    params = SamplingParams(temperature=temperature, top_p=top_p)
     tokens, _ = sample(logits.expand(draws, -1), params, torch.Generator().manual_seed(0))
     return [(tokens == token).float().mean().item() for token in THREE]
 
@@ -44,6 +46,16 @@ def test_the_default_temperature_is_1():
 def test_a_temperature_must_be_positive(temperature: float):
     with pytest.raises(ValidationError):
         SamplingParams(temperature=temperature)
+
+
+def test_top_p_defaults_to_1():
+    assert SamplingParams().top_p == 1.0
+
+
+@pytest.mark.parametrize("top_p", [0.0, -0.5, 1.5])
+def test_top_p_must_be_above_0_and_at_most_1(top_p: float):
+    with pytest.raises(ValidationError):
+        SamplingParams(top_p=top_p)
 
 
 # --- the policy's log-probabilities ---------------------------------------------------------
@@ -115,3 +127,43 @@ def test_the_generator_decides_the_draws():
 
     assert torch.equal(draw(0), draw(0))
     assert not torch.equal(draw(0), draw(1))
+
+
+# --- top-p ----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("top_p", "kept"),
+    [
+        (0.01, [1.0, 0.0, 0.0]),  # the likeliest token is always kept
+        (0.4, [1.0, 0.0, 0.0]),  # "0" alone holds 0.5, at least 0.4
+        (0.75, [0.625, 0.375, 0.0]),  # "0" and "1" hold 0.8: scaled up to add up to 1
+        (0.9, [0.5, 0.3, 0.2]),  # all three are needed
+    ],
+)
+def test_top_p_keeps_the_fewest_likeliest_tokens_that_hold_p(top_p: float, kept: list[float]):
+    probs = nucleus(log_probs(three_way([0.5, 0.3, 0.2]), 1.0), top_p).exp()[0]
+    assert probs[THREE].tolist() == pytest.approx(kept, abs=1e-6)
+    others = [token for token in range(VOCAB_SIZE) if token not in THREE]
+    assert torch.all(probs[others] == 0)  # even the e^-50 ones: top_p is reached without them
+
+
+def test_top_p_1_changes_nothing():
+    logp = log_probs(random_logits(4), 1.0)
+    assert torch.equal(nucleus(logp, 1.0), logp)
+
+
+def test_draws_with_top_p_come_from_the_nucleus():
+    observed = frequencies(three_way([0.5, 0.3, 0.2]), temperature=1.0, top_p=0.75)
+    assert observed == pytest.approx([0.625, 0.375, 0.0], abs=0.015)
+
+
+def test_with_top_p_a_draws_log_probs_are_the_samplers_not_the_policys():
+    logits = random_logits(8)
+    params = SamplingParams(temperature=0.7, top_p=0.5)
+    tokens, logp = sample(logits, params, torch.Generator().manual_seed(0))
+    policy = log_probs(logits, 0.7)
+    sampler = nucleus(policy, 0.5)
+    assert torch.equal(logp, sampler.gather(-1, tokens[:, None]).squeeze(-1))
+    # The nucleus holds less than all the probability, so each kept token's share grows.
+    assert torch.all(logp > policy.gather(-1, tokens[:, None]).squeeze(-1))

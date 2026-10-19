@@ -92,10 +92,14 @@ class EvalConfig(StrictModel):
 
 class SamplingParams(StrictModel):
     """How a rollout picks each next token: drawn at random from the model's probabilities,
-    made sharper or flatter by the temperature. (Greedy decoding, always the likeliest token,
-    is grading's job and needs no settings.)"""
+    made sharper or flatter by the temperature, and cut down to the likeliest tokens by
+    top_p. (Greedy decoding, always the likeliest token, is grading's job and needs no
+    settings.)"""
 
     temperature: float = Field(default=1.0, gt=0)  # below 1 sharper, above 1 flatter
+    # Draw only from the fewest likeliest tokens holding at least this much probability; 1
+    # keeps every token. Below 1, the draws no longer come from the policy itself.
+    top_p: float = Field(default=1.0, gt=0, le=1)
 
 
 class ExperimentConfig(StrictModel):

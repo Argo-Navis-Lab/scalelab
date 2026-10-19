@@ -54,6 +54,18 @@ class OptimConfig(StrictModel):
     weight_decay: float = Field(default=0.0, ge=0)
 
 
+class WarmStartConfig(StrictModel):
+    """Supervised training on worked solutions, before RL: how much, and how fast."""
+
+    tokens: int = Field(default=100_000_000, gt=0)  # the budget: positions read, padding excluded
+    batch_size: int = Field(default=64, gt=0)  # sequences per step
+    lr: float = Field(default=1e-3, gt=0)  # the peak learning rate
+    warmup: float = Field(default=0.02, ge=0, lt=1)  # share of the budget spent ramping lr up
+    decay_to: float = Field(default=0.1, ge=0, le=1)  # the final lr, as a fraction of lr
+    weight_decay: float = Field(default=0.1, ge=0)
+    grad_clip: float = Field(default=1.0, gt=0)  # the largest gradient norm a step may use
+
+
 class ExperimentConfig(StrictModel):
     """Everything that defines WHAT the experiment is. This gets hashed."""
 

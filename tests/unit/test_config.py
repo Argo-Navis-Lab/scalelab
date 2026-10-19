@@ -24,6 +24,7 @@ def test_hello_is_a_short_warm_start_on_every_arithmetic_band():
     config = load_config(HELLO_YAML)
     assert (config.warm_start.tokens, config.warm_start.batch_size) == (20_000, 16)
     assert config.task.difficulties == (2, 3, 4, 5)  # from configs/tasks/arithmetic.yaml
+    assert (config.eval.every, config.eval.problems) == (1000, 20)  # graded once, at the end
 
 
 def test_head_dim_is_width_over_heads(config):

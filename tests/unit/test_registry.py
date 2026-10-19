@@ -2,6 +2,7 @@
 
 import hashlib
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from sqlalchemy import func, insert, inspect, select
@@ -18,6 +19,7 @@ from scalelab.core.envcapture import (
 )
 from scalelab.core.hashing import canonical_json, config_hash
 from scalelab.core.registry import (
+    EvalRecord,
     OutdatedRegistryError,
     Registry,
     RunExistsError,
@@ -54,7 +56,7 @@ def test_creates_file_and_tables(tmp_path):
     path = tmp_path / "sub" / "registry.db"  # the folder doesn't exist yet either
     registry = Registry.sqlite(path)
     assert path.is_file()
-    assert sorted(inspect(registry.engine).get_table_names()) == ["experiments", "runs"]
+    assert sorted(inspect(registry.engine).get_table_names()) == ["evals", "experiments", "runs"]
 
 
 def test_rows_survive_reopening_the_file(tmp_path, config, env):
@@ -233,3 +235,58 @@ def test_registry_from_an_older_version_is_reported(tmp_path):
         conn.exec_driver_sql("ALTER TABLE runs DROP COLUMN deterministic")  # make it "old"
     with pytest.raises(OutdatedRegistryError, match=r"missing the columns \['deterministic'\]"):
         Registry.sqlite(path)
+
+# --- added in m1s21: eval results ------------------------------------------------
+
+def graded(
+    run_id: str, step: int = 100, task: str = "arithmetic-2", value: float = 0.5) -> EvalRecord:
+    """One greedy pass@1 result on 1000 problems, for the tests to store."""
+    return EvalRecord(
+        run_id=run_id,
+        step=step,
+        task=task,
+        metric="greedy_pass@1",
+        value=value,
+        n=1000,
+        stderr=0.0158,
+    )
+
+
+def test_eval_results_come_back_in_order(
+    registry: Registry, config: ExperimentConfig, env: EnvInfo
+):
+    run_id = registry.add_run(config, seed=0, env=env)
+    registry.record_eval(graded(run_id, step=200))
+    registry.record_eval(graded(run_id, step=100, task="arithmetic-3"))
+    registry.record_eval(graded(run_id, step=100))
+    assert [(e.step, e.task) for e in registry.list_evals(run_id)] == [
+        (100, "arithmetic-2"),
+        (100, "arithmetic-3"),
+        (200, "arithmetic-2"),
+    ]
+
+
+def test_grading_a_step_again_replaces_its_result(
+    registry: Registry, config: ExperimentConfig, env: EnvInfo
+):
+    run_id = registry.add_run(config, seed=0, env=env)
+    registry.record_eval(graded(run_id, value=0.5))
+    registry.record_eval(graded(run_id, value=0.6))  # a resumed run redid step 100
+    assert [e.value for e in registry.list_evals(run_id)] == [0.6]
+
+
+def test_an_eval_result_needs_a_known_run(registry: Registry):
+    with pytest.raises(IntegrityError, match="FOREIGN KEY"):
+        registry.record_eval(graded("0000000000000000-s0-00000000"))
+
+
+def test_a_registry_from_before_evals_gains_the_table(
+    tmp_path: Path, config: ExperimentConfig, env: EnvInfo
+):
+    path = tmp_path / "registry.db"
+    run_id = Registry.sqlite(path).add_run(config, seed=0, env=env)
+    with Registry.sqlite(path).engine.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE evals")  # now it looks like a step 20 registry
+    reopened = Registry.sqlite(path)
+    assert reopened.get_run(run_id) is not None  # the old rows are untouched...
+    assert reopened.list_evals(run_id) == []  # ...and the new table is there, empty

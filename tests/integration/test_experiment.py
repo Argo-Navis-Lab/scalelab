@@ -6,8 +6,12 @@ import torch
 
 from scalelab.core.checkpoint import latest_checkpoint
 from scalelab.core.config import ExperimentConfig, load_config
-from scalelab.rl.experiment import make_task, run_experiment
+from scalelab.rl.evaluation import EvalResult
+from scalelab.rl.experiment import load_eval_sets, make_task, run_experiment
 from scalelab.rl.warmstart_loop import StepMetrics
+from scalelab.tasks.arithmetic import ArithmeticProblem
+from scalelab.tasks.countdown import CountdownProblem
+from scalelab.tasks.evalsets import read_eval_set
 
 HELLO = Path(__file__).resolve().parents[2] / "configs" / "experiments" / "hello.yaml"
 
@@ -45,8 +49,36 @@ def test_countdown_warm_starts_too(tmp_path: Path):
     assert metrics[-1].tokens >= 20_000
 
 
-def test_each_task_keeps_its_own_eval_questions_out():
-    for name in ("arithmetic", "countdown"):
-        task, excluded = make_task(name)
-        assert task.name == name
-        assert len(excluded) == 4 * 1000  # 4 bands of 1000
+def test_each_task_comes_with_the_type_of_its_problems():
+    task, problem_type = make_task("arithmetic")
+    assert (task.name, problem_type) == ("arithmetic", ArithmeticProblem)
+    task, problem_type = make_task("countdown")
+    assert (task.name, problem_type) == ("countdown", CountdownProblem)
+
+
+def test_the_eval_sets_are_those_of_the_training_difficulties():
+    task, problem_type = make_task("arithmetic")
+    sets = load_eval_sets(task, problem_type, [2, 5, 9], problems=20)
+    assert list(sets) == ["arithmetic-2", "arithmetic-5"]  # there's no 9-digit eval set
+    assert sets["arithmetic-2"] == read_eval_set("arithmetic-2", ArithmeticProblem)[:20]
+
+
+# --- grading --------------------------------------------------------------------------------
+
+
+def test_grading_comes_every_so_often_and_after_the_last_step(tmp_path: Path):
+    graded: list[tuple[int, list[str], list[int]]] = []
+
+    def report(metrics: StepMetrics, results: list[EvalResult]) -> None:
+        graded.append((metrics.step, [r.name for r in results], [r.n for r in results]))
+
+    config = load_config(HELLO, ["eval.every=5", "eval.problems=5"])
+    run_experiment(config, 0, tmp_path / "ckpt", tmp_path, report=report)
+    names = ["arithmetic-2", "arithmetic-3", "arithmetic-4", "arithmetic-5"]
+    assert graded == [(step, names, [5] * 4) for step in (5, 10, 15, 16)]  # 16 is the last
+
+
+def test_grading_changes_nothing_about_training(tmp_path: Path):
+    config = load_config(HELLO, ["eval.every=5", "eval.problems=5"])
+    graded = run_experiment(config, 0, tmp_path / "a", tmp_path, report=lambda m, r: None)
+    assert graded == run_experiment(config, 0, tmp_path / "b", tmp_path)  # never graded

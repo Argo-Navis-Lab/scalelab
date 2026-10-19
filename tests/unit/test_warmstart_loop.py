@@ -117,6 +117,19 @@ def test_the_flop_ledger_counts_what_the_cost_model_predicts(tmp_path: Path):
     assert metrics[0].flops == count_flops(ModelSpec.from_config(TINY), workload).total
     assert all(a.flops < b.flops for a, b in zip(metrics, metrics[1:], strict=False))
 
+def test_on_step_sees_every_step(tmp_path: Path):
+    seen: list[StepMetrics] = []
+    metrics = warm_start(
+        make(),
+        TASK,
+        [2],
+        SMALL,
+        np.random.default_rng(0),
+        tmp_path / "ckpt",
+        tmp_path,
+        on_step=seen.append,  # each step's metrics are added to `seen` as they come
+    )
+    assert seen == metrics
 
 def test_the_last_step_is_always_saved(tmp_path: Path):
     model, metrics = train(tmp_path)

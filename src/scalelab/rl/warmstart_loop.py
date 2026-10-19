@@ -1,7 +1,7 @@
 """The warm-start training loop: worked solutions, step after step, until the budget is spent."""
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -69,6 +69,7 @@ def warm_start[P](
     policy: CheckpointPolicy | None = None,
     excluded: frozenset[tuple[int, ...]] = frozenset(),
     stop_after: int | None = None,
+    on_step: Callable[[StepMetrics], None] | None = None,
 ) -> list[StepMetrics]:
     """Train `model` on worked solutions until config.tokens positions have been read,
     resuming from the latest checkpoint in `checkpoint_dir` if there is one.
@@ -76,6 +77,7 @@ def warm_start[P](
     Returns the metrics of every step this call ran. Saving follows `policy` (by default:
     every 15 minutes, keeping 2), and the last step is always saved, because its weights are
     what RL will start from. `stop_after=k` pretends the job is interrupted after step k.
+    `on_step`, if given, is called with each step's metrics before any saving.
     """
     policy = policy or CheckpointPolicy()
     optimizer = make_optimizer(model, config)
@@ -121,7 +123,8 @@ def warm_start[P](
                 grad_norm=grad_norm.item(),
             )
         )
-
+        if on_step is not None:
+            on_step(metrics[-1])
         if step == stop_after:
             policy.request_stop()
         if tokens >= config.tokens or policy.due(step):

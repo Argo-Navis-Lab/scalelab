@@ -7,3 +7,6 @@ name: hello
 warm_start:
   tokens: 20000  # a smoke test: a real warm start reads 100 million
   batch_size: 16
+
+eval:
+  problems: 20  # a smoke test: real runs grade all 1000 problems of each eval set

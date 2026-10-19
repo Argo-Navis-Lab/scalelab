@@ -83,6 +83,13 @@ class WarmStartConfig(StrictModel):
     grad_clip: float = Field(default=1.0, gt=0)  # the largest gradient norm a step may use
 
 
+class EvalConfig(StrictModel):
+    """How a run is graded: greedy pass@1 on the frozen eval sets of its training levels."""
+
+    every: int = Field(default=1000, ge=0)  # steps between gradings; 0 means only at the end
+    problems: int = Field(default=1000, gt=0)  # the first this many of each eval set
+
+
 class ExperimentConfig(StrictModel):
     """Everything that defines WHAT the experiment is. This gets hashed."""
 
@@ -91,6 +98,7 @@ class ExperimentConfig(StrictModel):
     task: TaskConfig
     optim: OptimConfig = Field(default_factory=OptimConfig)
     warm_start: WarmStartConfig = Field(default_factory=WarmStartConfig)
+    eval: EvalConfig = Field(default_factory=EvalConfig)
 
 
 class RuntimeConfig(StrictModel):

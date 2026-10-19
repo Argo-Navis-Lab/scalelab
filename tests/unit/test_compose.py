@@ -34,9 +34,10 @@ def configs(tmp_path):
 
 def test_hello_hash_is_pinned():
     # Changed on purpose in 'm1s12', when ModelConfig gained context and qk_norm
-    # (it was 3f7ffa68d30146bd), and in 'm1s20', when experiments gained warm_start and
-    # tasks their difficulties (it was bbf7148085e02220).
-    assert config_hash(load_config(HELLO)) == "7a76134cf42d7eaf"
+    # (it was 3f7ffa68d30146bd), in 'm1s20', when experiments gained warm_start and
+    # tasks their difficulties (it was bbf7148085e02220), and in 'm1s21', when
+    # experiments gained eval (it was 7a76134cf42d7eaf).
+    assert config_hash(load_config(HELLO)) == "c6b6e17b3e7b116b"
 
 
 @pytest.mark.parametrize("name", ["m1", "m2", "m3", "m4", "m5", "m6", "m7"])

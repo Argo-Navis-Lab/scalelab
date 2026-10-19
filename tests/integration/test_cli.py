@@ -31,8 +31,8 @@ def test_one_command_records_a_complete_run_row(home, capsys):
 
     registry = Registry.sqlite(home / "registry.db")
     (run,) = registry.list_runs()
-    assert run.run_id.startswith("7a76134cf42d7eaf-s3-")
-    assert run.config_hash == "7a76134cf42d7eaf"
+    assert run.run_id.startswith("c6b6e17b3e7b116b-s3-")
+    assert run.config_hash == "c6b6e17b3e7b116b"
     assert run.seed == 3
     assert run.status == "done"
     assert run.deterministic is True  # tests run on CPUs, where it is on by default
@@ -43,6 +43,8 @@ def test_one_command_records_a_complete_run_row(home, capsys):
     assert EnvInfo.model_validate_json(run.env_json).git.sha.startswith(run.run_id[-8:])
     assert registry.experiment_json(run.config_hash) is not None
     assert "done: ran 16 steps" in capsys.readouterr().out
+    graded = [(e.step, e.task, e.metric, e.n) for e in registry.list_evals(run.run_id)]
+    assert graded == [(16, f"arithmetic-{d}", "greedy_pass@1", 20) for d in (2, 3, 4, 5)]
 
 
 def test_running_it_again_does_nothing(home, capsys):
@@ -61,7 +63,7 @@ def test_runtime_settings_do_not_change_the_run(home, capsys):
 def test_overrides_make_a_different_experiment(home):
     main(["run", str(HELLO), "model=ladder_s/m2"])
     (run,) = Registry.sqlite(home / "registry.db").list_runs()
-    assert run.config_hash != "7a76134cf42d7eaf"
+    assert run.config_hash != "c6b6e17b3e7b116b"
 
 
 @pytest.mark.parametrize(

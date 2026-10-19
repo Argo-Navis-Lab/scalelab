@@ -12,12 +12,15 @@ from scalelab.core.checkpoint import CheckpointPolicy
 from scalelab.core.config import RuntimeConfig, load_config, parse_override
 from scalelab.core.determinism import MAX_SEED, default_deterministic
 from scalelab.core.envcapture import EnvInfo, capture_env
-from scalelab.core.registry import OutdatedRegistryError, Registry
+from scalelab.core.registry import EvalRecord, OutdatedRegistryError, Registry
 from scalelab.core.storage import registry_path, scalelab_home
+from scalelab.rl.evaluation import EvalResult
 from scalelab.rl.experiment import run_experiment
+from scalelab.rl.warmstart_loop import StepMetrics
 
 EXIT_USAGE = 2  # the command line asked for something impossible
 EXIT_INTERRUPTED = 130  # stopped early with a checkpoint saved; run again to resume
+METRIC = "greedy_pass@1"  # the only metric so far; sampled pass@k arrives with m2's sampling
 
 
 class UsageError(Exception):
@@ -84,6 +87,23 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
         print("already done: nothing to do")
         return 0
 
+    def report(metrics: StepMetrics, results: list[EvalResult]) -> None:
+        """Record each eval result in the registry, and print one line of progress."""
+        for result in results:
+            registry.record_eval(
+                EvalRecord(
+                    run_id=run_id,
+                    step=metrics.step,
+                    task=result.name,
+                    metric=METRIC,
+                    value=result.pass_rate,
+                    n=result.n,
+                    stderr=result.stderr,
+                )
+            )
+        rates = "  ".join(f"{result.name} {result.pass_rate:.1%}" for result in results)
+        print(f"step {metrics.step:,}: loss {metrics.loss:.3f}  {rates}")
+
     policy = CheckpointPolicy()
     previous_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
     policy.stop_on_signals()  # from here on, Ctrl+C and SIGTERM mean "save and stop"
@@ -102,6 +122,7 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
                 home=home,
                 policy=policy,
                 deterministic=deterministic,
+                report=report,
             )
         except Exception:
             registry.finish_run(run_id, "failed")

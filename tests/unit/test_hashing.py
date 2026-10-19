@@ -64,6 +64,7 @@ def test_written_out_defaults_give_same_hash(raw):
         ("task", "difficulties", [2, 3]),
         ("optim", "lr", 1e-3),
         ("warm_start", "tokens", 1000),
+        ("eval", "every", 10),
     ],
 )
 def test_one_value_change_gives_different_hash(raw, section, key, value):

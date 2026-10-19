@@ -1,4 +1,4 @@
-"""Run registry: one database row per experiment and per run."""
+"""Run registry: one database row per experiment and per run, and one per eval result."""
 
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +9,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Engine,
+    Float,
     ForeignKey,
     Integer,
     MetaData,
@@ -17,6 +18,7 @@ from sqlalchemy import (
     Table,
     Text,
     create_engine,
+    delete,
     event,
     insert,
     inspect,
@@ -68,6 +70,18 @@ runs = Table(
     Column("env_json", Text, nullable=False),
 )
 
+evals = Table(
+    "evals",
+    metadata,
+    Column("run_id", String, ForeignKey("runs.run_id"), primary_key=True),
+    Column("step", Integer, primary_key=True),
+    Column("task", String, primary_key=True),  # the eval set, such as "arithmetic-3"
+    Column("metric", String, primary_key=True),  # such as "greedy_pass@1"
+    Column("value", Float, nullable=False),
+    Column("n", Integer, nullable=False),  # how many problems were graded
+    Column("stderr", Float, nullable=False),
+)
+
 
 class RunRecord(StrictModel):
     """One row of the runs table, as a typed Python object."""
@@ -84,6 +98,18 @@ class RunRecord(StrictModel):
     started_at: datetime
     ended_at: datetime | None
     env_json: str
+
+
+class EvalRecord(StrictModel):
+    """One row of the evals table: one metric of one run on one eval set, at one step."""
+
+    run_id: str
+    step: int
+    task: str
+    metric: str
+    value: float
+    n: int
+    stderr: float
 
 
 class OutdatedRegistryError(Exception):
@@ -234,6 +260,29 @@ class Registry:
             )
             if result.rowcount == 0:
                 raise ValueError(f"no unfinished run with id {run_id}")
+
+    def record_eval(self, record: EvalRecord) -> None:
+        """Store one eval result, replacing any stored for the same run, step, eval set and
+        metric: a resumed run redoes the steps after its last checkpoint, gradings included."""
+        same = (
+            (evals.c.run_id == record.run_id)
+            & (evals.c.step == record.step)
+            & (evals.c.task == record.task)
+            & (evals.c.metric == record.metric)
+        )
+        with self.engine.begin() as conn:  # one transaction: never both rows, never neither
+            conn.execute(delete(evals).where(same))
+            conn.execute(insert(evals).values(**record.model_dump()))
+
+    def list_evals(self, run_id: str) -> list[EvalRecord]:
+        """A run's eval results, in order of step, then eval set, then metric."""
+        query = (
+            select(evals)
+            .where(evals.c.run_id == run_id)
+            .order_by(evals.c.step, evals.c.task, evals.c.metric)
+        )
+        with self.engine.connect() as conn:
+            return [EvalRecord.model_validate(dict(row)) for row in conn.execute(query).mappings()]
 
     def get_run(self, run_id: str) -> RunRecord | None:
         with self.engine.connect() as conn:

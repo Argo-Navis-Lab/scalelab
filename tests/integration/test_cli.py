@@ -122,3 +122,29 @@ def test_interrupted_run_resumes_to_the_same_result(home, tmp_path, capsys, monk
     assert last_loss(output) == expected
     (run,) = Registry.sqlite(other_home / "registry.db").list_runs()
     assert run.status == "done"
+
+
+# --- added in m1s22: a registry on the machine's own disk, copied home ----------------------
+
+
+def on_disk_of(machine: Path) -> str:
+    """The override that keeps the live registry on `machine`'s own disk."""
+    return f"runtime.local_registry={machine / 'registry.db'}"
+
+
+def test_a_local_registry_is_copied_home(home: Path, tmp_path: Path):
+    vm = tmp_path / "vm"  # the VM's own disk, while `home` plays Google Drive
+    assert main(["run", str(HELLO), on_disk_of(vm)]) == 0
+    assert (home / "registry.db").read_bytes() == (vm / "registry.db").read_bytes()
+    copy = Registry.sqlite(home / "registry.db")
+    (run,) = copy.list_runs()
+    assert run.status == "done"
+    assert len(copy.list_evals(run.run_id)) == 4  # the final grade on each eval set
+
+
+def test_a_new_machine_carries_on_from_the_copy_at_home(
+    home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    main(["run", str(HELLO), on_disk_of(tmp_path / "vm1")])
+    assert main(["run", str(HELLO), on_disk_of(tmp_path / "vm2")]) == 0
+    assert "already done" in capsys.readouterr().out  # vm2 began from vm1's copy at home

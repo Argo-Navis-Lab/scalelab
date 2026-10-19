@@ -108,6 +108,10 @@ class RuntimeConfig(StrictModel):
     worker_name: str = "local"
     log_level: Literal["DEBUG", "INFO", "WARNING"] = "INFO"
     deterministic: bool | None = None  # None: on for CPU runs, off for GPU runs
+    # Keep the live registry here, on the machine's own disk, and copy it to <home> after
+    # every change. For Colab, where <home> is on Google Drive: SQLite over the Drive mount
+    # is unreliable. None keeps the one registry at <home>/registry.db.
+    local_registry: str | None = None
 
 
 # --- composing a config from several files --------------------------------------------

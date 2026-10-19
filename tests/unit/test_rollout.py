@@ -70,6 +70,14 @@ def test_each_answer_ends_at_its_eos_or_where_the_context_runs_out():
     # however its rounding steers the draws (9 rows could all happen to end one way).
     batch = generate(make(SHORT), PROMPTS, 20, SamplingParams(), torch.Generator().manual_seed(0))
     assert set(batch.finish_reasons) == {"eos", "length"}
+    for row, (answer, reason) in enumerate(zip(batch.answers(), batch.finish_reasons, strict=True)):
+        if reason == "eos":
+            assert answer[-1] == EOS and EOS not in answer[:-1]
+        else:
+            assert EOS not in answer
+            assert batch.lengths[row] == SHORT.context
+        assert torch.all(batch.tokens[row, batch.lengths[row] :] == PAD)  # padding after the end
+    assert batch.tokens.shape[1] == max(batch.lengths.tolist())
 
 
 def test_answers_only_use_tokens_a_model_may_write():

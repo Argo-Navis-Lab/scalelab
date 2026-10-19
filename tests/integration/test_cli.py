@@ -1,4 +1,4 @@
-"""The M0 exit criterion: one command records a complete run row."""
+"""The m0 exit criterion: one command records a complete run row."""
 
 import os
 import signal

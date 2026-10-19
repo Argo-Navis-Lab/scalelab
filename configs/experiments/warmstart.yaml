@@ -1,0 +1,7 @@
+# M1's exit: the full warm start of one ladder model (choose it with model=ladder_s/m2,
+# and so on): 100 million tokens on every arithmetic band, graded every 1000 steps.
+defaults:
+  - model: ladder_s/m1
+  - task: arithmetic
+
+name: warmstart

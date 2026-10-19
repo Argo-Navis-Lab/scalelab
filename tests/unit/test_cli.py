@@ -2,7 +2,7 @@
 
 import pytest
 
-from scalelab.cli import same_uncommitted_changes, split_overrides
+from scalelab.cli import duration, same_uncommitted_changes, speed, split_overrides
 from scalelab.core.envcapture import EnvInfo, GitInfo, HardwareInfo, SoftwareInfo
 
 
@@ -45,3 +45,27 @@ def env_with(diff_sha256: str | None) -> EnvInfo:
 )
 def test_resuming_needs_the_same_uncommitted_changes(then, now, same):
     assert same_uncommitted_changes(env_with(then).model_dump_json(), env_with(now)) is same
+
+
+@pytest.mark.parametrize(
+    ("seconds", "text"),
+    [
+        (40, "40 s"),
+        (100, "2 min"),
+        (12 * 60, "12 min"),
+        (2 * 3600, "2.0 h"),
+        (3.24 * 3600, "3.2 h"),
+    ],
+)
+def test_durations_read_the_way_people_say_them(seconds: float, text: str):
+    assert duration(seconds) == text
+
+
+def test_speed_and_time_left():
+    # 10,000 tokens in 2 s is 5,000 a second; 50,000 of 100,000 are left: 10 s to go.
+    assert speed(10_000, 2.0, 50_000, 100_000) == "5,000 tokens/s, about 10 s to go"
+
+
+def test_once_the_budget_is_spent_nothing_is_left():
+    # The last step reads a little past the budget (it counts as "at least"), not before it.
+    assert speed(1_000, 1.0, 100_500, 100_000) == "1,000 tokens/s, about 0 s to go"

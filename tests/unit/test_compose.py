@@ -40,6 +40,14 @@ def test_hello_hash_is_pinned():
     assert config_hash(load_config(HELLO)) == "c6b6e17b3e7b116b"
 
 
+def test_the_warm_start_experiment_is_pinned():
+    # M1's exit runs are recorded under this hash: if it changes, they become another
+    # experiment. Added in 'm1s23'.
+    config = load_config(REPO_CONFIGS / "experiments" / "warmstart.yaml")
+    assert (config.warm_start.tokens, config.eval.every) == (100_000_000, 1000)
+    assert config_hash(config) == "fe517a7d8454cb44"
+
+
 @pytest.mark.parametrize("name", ["m1", "m2", "m3", "m4", "m5", "m6", "m7"])
 def test_every_ladder_model_is_valid_with_64_wide_heads(name):
     config = load_config(HELLO, [f"model=ladder_s/{name}"])

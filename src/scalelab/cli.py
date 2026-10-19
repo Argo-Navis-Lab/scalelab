@@ -4,6 +4,7 @@ import argparse
 import shutil
 import signal
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,23 @@ def split_overrides(overrides: Sequence[str]) -> tuple[int, dict[str, Any], list
         else:
             config.append(text)
     return seed, runtime, config
+
+
+def duration(seconds: float) -> str:
+    """A length of time, rounded the way a person would say it: "40 s", "12 min", "3.2 h"."""
+    if seconds < 90:
+        return f"{seconds:.0f} s"
+    if seconds < 90 * 60:
+        return f"{seconds / 60:.0f} min"
+    return f"{seconds / 3600:.1f} h"
+
+
+def speed(tokens: int, seconds: float, done: int, budget: int) -> str:
+    """How fast `tokens` went by in `seconds`, and how long the rest of the budget will take
+    at that speed, with `done` of its `budget` tokens read so far."""
+    per_second = tokens / seconds
+    left = max(0, budget - done) / per_second  # the last step overshoots the budget a little
+    return f"{per_second:,.0f} tokens/s, about {duration(left)} to go"
 
 
 def same_uncommitted_changes(recorded_env_json: str, env: EnvInfo) -> bool:
@@ -104,8 +122,14 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
         print("already done: nothing to do")
         return 0
 
+    # Speed is measured between gradings, from the time and token count at the last one. A
+    # resumed run's starting token count isn't known here, so its first grading shows none.
+    last_tokens = 0 if existing is None else None
+
     def report(metrics: StepMetrics, results: list[EvalResult]) -> None:
-        """Record each eval result in the registry, and print one line of progress."""
+        """Record each eval result in the registry, and print one line of progress: the
+        grades, and the speed since the last grading, with the time it gives to the end."""
+        nonlocal last_time, last_tokens
         for result in results:
             registry.record_eval(
                 EvalRecord(
@@ -120,7 +144,12 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
             )
         copy_home()
         rates = "  ".join(f"{result.name} {result.pass_rate:.1%}" for result in results)
-        print(f"step {metrics.step:,}: loss {metrics.loss:.3f}  {rates}")
+        now, pace = time.monotonic(), ""
+        if last_tokens is not None and now > last_time:
+            read = metrics.tokens - last_tokens  # tokens read since the last grading
+            pace = f"  ({speed(read, now - last_time, metrics.tokens, config.warm_start.tokens)})"
+        last_time, last_tokens = now, metrics.tokens
+        print(f"step {metrics.step:,}: loss {metrics.loss:.3f}  {rates}{pace}")
 
     policy = CheckpointPolicy()
     previous_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
@@ -133,6 +162,7 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
             registry.reopen_run(run_id)
             print(f"resuming (it was {existing.status})")
         copy_home()
+        started = last_time = time.monotonic()  # the clock starts with training
         try:
             metrics = run_experiment(
                 config,
@@ -162,8 +192,8 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
         return 0
     last = metrics[-1]
     print(
-        f"done: ran {len(metrics)} steps ({last.tokens:,} tokens and {last.flops:.2e} FLOPs "
-        f"in all), last loss {last.loss!r}"
+        f"done: ran {len(metrics)} steps in {duration(time.monotonic() - started)} "
+        f"({last.tokens:,} tokens and {last.flops:.2e} FLOPs in all), last loss {last.loss!r}"
     )
     return 0
 

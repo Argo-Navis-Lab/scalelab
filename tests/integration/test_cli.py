@@ -1,6 +1,7 @@
 """The m0 exit criterion: one command records a complete run row."""
 
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -148,3 +149,19 @@ def test_a_new_machine_carries_on_from_the_copy_at_home(
     main(["run", str(HELLO), on_disk_of(tmp_path / "vm1")])
     assert main(["run", str(HELLO), on_disk_of(tmp_path / "vm2")]) == 0
     assert "already done" in capsys.readouterr().out  # vm2 began from vm1's copy at home
+
+
+# --- added in m1s23: speed and time left ------------------------------------------------------
+
+
+def test_each_grading_reports_the_speed_and_the_time_left(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    main(["run", str(HELLO), "eval.every=5"])
+    output = capsys.readouterr().out
+    gradings = [line for line in output.splitlines() if line.startswith("step ")]
+    assert [line.split(":")[0] for line in gradings] == ["step 5", "step 10", "step 15", "step 16"]
+    speed = re.compile(r"\([\d,]+ tokens/s, about \d+(\.\d)? (s|min|h) to go\)$")
+    assert all(speed.search(line) for line in gradings), gradings
+    assert gradings[-1].endswith("about 0 s to go)")  # the budget is spent
+    assert re.search(r"done: ran 16 steps in \d+ s \(", output)

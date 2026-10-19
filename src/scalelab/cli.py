@@ -4,10 +4,13 @@ import argparse
 import shutil
 import signal
 import sys
+import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+
+import torch
 
 from scalelab.core import hashing
 from scalelab.core.checkpoint import CheckpointPolicy
@@ -17,7 +20,8 @@ from scalelab.core.envcapture import EnvInfo, capture_env
 from scalelab.core.registry import EvalRecord, OutdatedRegistryError, Registry
 from scalelab.core.storage import atomic_write_bytes, registry_path, scalelab_home
 from scalelab.rl.evaluation import EvalResult
-from scalelab.rl.experiment import run_experiment
+from scalelab.rl.experiment import grade_by_part, load_eval_sets, make_task, run_experiment
+from scalelab.rl.finished import load_finished_run
 from scalelab.rl.warmstart_loop import StepMetrics
 
 EXIT_USAGE = 2  # the command line asked for something impossible
@@ -198,6 +202,40 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
     return 0
 
 
+def grade(run_id: str, problems: int) -> int:
+    """`scalelab grade`: greedy pass@1 of a finished run's model on the frozen eval sets of
+    its task, whole and by part (arithmetic's operations). Prints the grades, records nothing."""
+    if problems < 1:
+        raise UsageError(f"--problems must be at least 1, got {problems}")
+    home = scalelab_home()
+    source = registry_path(home)
+    if not source.is_file():
+        raise UsageError(f"no registry at {source}")
+    with tempfile.TemporaryDirectory() as folder:
+        # Read a private copy, so the registry itself is never locked or changed: on Colab
+        # it lives on Google Drive, where SQLite is unreliable.
+        copy = Path(folder) / "registry.db"
+        shutil.copyfile(source, copy)
+        try:
+            finished = load_finished_run(Registry.sqlite(copy), home, run_id)
+        except (ValueError, OutdatedRegistryError) as err:
+            raise UsageError(str(err)) from None
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    task, problem_type = make_task(finished.task.name)
+    eval_sets = load_eval_sets(task, problem_type, finished.task.difficulties, problems)
+    levels = ", ".join(str(level) for level in finished.task.difficulties)
+    print(f"run:   {run_id}")
+    print(
+        f"model: {finished.model.config.name}, step {finished.step:,}, "
+        f"trained on {task.name} at difficulties {levels}"
+    )
+    for result in grade_by_part(finished.model.to(device), task, eval_sets):
+        rate = f"{result.pass_rate:6.1%} ± {result.stderr:.1%}"
+        print(f"{result.name:<15}{rate}  ({result.passed} of {result.n})")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scalelab", description="ScaleLab command line.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -208,8 +246,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         nargs="*",
         help="key=value changes, e.g. seed=2 model=ladder_s/m2 warm_start.lr=3e-4",
     )
+    grade_parser = commands.add_parser("grade", help="grade a finished run on its eval sets")
+    grade_parser.add_argument("run_id", help="e.g. 71cd3add8c11e667-s0-2aeaf16b")
+    grade_parser.add_argument(
+        "--problems", type=int, default=1000, help="the first N of each eval set (default 1000)"
+    )
     args = parser.parse_args(argv)
     try:
+        if args.command == "grade":
+            return grade(args.run_id, args.problems)
         return run(args.experiment, args.overrides)
     except UsageError as err:
         print(f"scalelab: error: {err}", file=sys.stderr)

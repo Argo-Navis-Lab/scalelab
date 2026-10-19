@@ -6,8 +6,9 @@ import torch
 
 from scalelab.core.checkpoint import latest_checkpoint
 from scalelab.core.config import ExperimentConfig, load_config
+from scalelab.models.transformer import Transformer
 from scalelab.rl.evaluation import EvalResult
-from scalelab.rl.experiment import load_eval_sets, make_task, run_experiment
+from scalelab.rl.experiment import grade_by_part, load_eval_sets, make_task, run_experiment
 from scalelab.rl.warmstart_loop import StepMetrics
 from scalelab.tasks.arithmetic import ArithmeticProblem
 from scalelab.tasks.countdown import CountdownProblem
@@ -61,6 +62,26 @@ def test_the_eval_sets_are_those_of_the_training_difficulties():
     sets = load_eval_sets(task, problem_type, [2, 5, 9], problems=20)
     assert list(sets) == ["arithmetic-2", "arithmetic-5"]  # there's no 9-digit eval set
     assert sets["arithmetic-2"] == read_eval_set("arithmetic-2", ArithmeticProblem)[:20]
+
+
+def test_arithmetic_is_graded_by_operation_and_countdown_whole():
+    with torch.random.fork_rng():
+        model = Transformer(load_config(HELLO).model)  # untrained: only the counts matter here
+    task, problem_type = make_task("arithmetic")
+    results = grade_by_part(model, task, load_eval_sets(task, problem_type, [2, 3], 10))
+    assert [(r.name, r.n) for r in results] == [
+        ("arithmetic-2", 10),
+        ("arithmetic-2/*", 3),
+        ("arithmetic-2/+", 5),
+        ("arithmetic-2/-", 2),
+        ("arithmetic-3", 10),
+        ("arithmetic-3/*", 1),
+        ("arithmetic-3/+", 6),
+        ("arithmetic-3/-", 3),
+    ]
+    task, problem_type = make_task("countdown")
+    results = grade_by_part(model, task, load_eval_sets(task, problem_type, [3], 10))
+    assert [(r.name, r.n) for r in results] == [("countdown-3", 10)]
 
 
 # --- grading --------------------------------------------------------------------------------

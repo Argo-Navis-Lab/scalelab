@@ -11,7 +11,7 @@ from scalelab.core.checkpoint import CheckpointPolicy
 from scalelab.core.config import ExperimentConfig, StrictModel
 from scalelab.core.determinism import seed_everything
 from scalelab.models.transformer import Transformer
-from scalelab.rl.evaluation import EvalResult, evaluate
+from scalelab.rl.evaluation import EvalResult, evaluate, evaluate_by
 from scalelab.rl.warmstart import eval_prompts
 from scalelab.rl.warmstart_loop import StepMetrics, warm_start
 from scalelab.tasks.arithmetic import ArithmeticProblem, ArithmeticTask
@@ -40,6 +40,25 @@ def load_eval_sets[P: StrictModel](
         if name in EVAL_SETS:  # some levels have none, such as 9-digit arithmetic
             sets[name] = read_eval_set(name, problem_type)[:problems]
     return sets
+
+
+def operation(problem: ArithmeticProblem) -> str:
+    """Which part of an arithmetic eval set a problem belongs to: its operation."""
+    return problem.op
+
+
+def grade_by_part(
+    model: Transformer, task: Task[Any], eval_sets: dict[str, list[Any]]
+) -> list[EvalResult]:
+    """Greedy pass@1 on each eval set: arithmetic's whole and then by operation, Countdown's
+    whole (it has no parts)."""
+    results: list[EvalResult] = []
+    for name, problems in eval_sets.items():
+        if task.name == "arithmetic":
+            results += evaluate_by(model, task, problems, name, key=operation)
+        else:
+            results.append(evaluate(model, task, problems, name))
+    return results
 
 
 def run_experiment(

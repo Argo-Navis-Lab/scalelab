@@ -56,6 +56,23 @@ class WorkloadSpec(StrictModel):
         return self
 
 
+class HardwareSpec(StrictModel):
+    """A device, as the cost model sees it (Section 5.1). Only memory so far: speeds and
+    efficiencies arrive with timing in M3. Values come from vendor datasheets, so treat
+    them as values to verify, not gospel."""
+
+    name: str
+    memory_bytes: int = Field(gt=0)  # the device's own memory (HBM or GDDR)
+    supports_bf16: bool  # the T4 doesn't, so it trains in float16 with loss scaling
+
+
+HARDWARE = {
+    "t4": HardwareSpec(name="t4", memory_bytes=16 * 10**9, supports_bf16=False),
+    "l4": HardwareSpec(name="l4", memory_bytes=24 * 10**9, supports_bf16=True),
+    "a100-40g": HardwareSpec(name="a100-40g", memory_bytes=40 * 10**9, supports_bf16=True),
+}
+
+
 class ModelSpec(StrictModel):
     """A model's shape, as the cost model sees it (blueprint Section 5.1)."""
 

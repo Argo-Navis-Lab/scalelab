@@ -8,11 +8,11 @@ import pytest
 from scalelab.core.config import ExperimentConfig
 
 # A known-good config, written the way a YAML file would give it to us
-# (the same values as configs/experiments/hello.yaml, defaults left out).
+# (hello.yaml's model and task; every other section left to its defaults).
 BASE_RAW = {
     "name": "hello",
     "model": {"name": "m1", "n_layers": 4, "d_model": 128, "n_heads": 2},
-    "task": {"name": "arithmetic", "max_digits": 4},
+    "task": {"name": "arithmetic", "difficulties": [2, 3, 4, 5]},
 }
 
 

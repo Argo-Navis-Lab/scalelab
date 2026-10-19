@@ -1,2 +1,3 @@
+# Digits per number: the eval bands, where +, - and * all fit the 256-token context.
 name: arithmetic
-max_digits: 4
+difficulties: [2, 3, 4, 5]

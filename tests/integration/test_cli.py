@@ -31,8 +31,8 @@ def test_one_command_records_a_complete_run_row(home, capsys):
 
     registry = Registry.sqlite(home / "registry.db")
     (run,) = registry.list_runs()
-    assert run.run_id.startswith("bbf7148085e02220-s3-")
-    assert run.config_hash == "bbf7148085e02220"
+    assert run.run_id.startswith("7a76134cf42d7eaf-s3-")
+    assert run.config_hash == "7a76134cf42d7eaf"
     assert run.seed == 3
     assert run.status == "done"
     assert run.deterministic is True  # tests run on CPUs, where it is on by default
@@ -42,7 +42,7 @@ def test_one_command_records_a_complete_run_row(home, capsys):
     assert run.started_at <= run.ended_at
     assert EnvInfo.model_validate_json(run.env_json).git.sha.startswith(run.run_id[-8:])
     assert registry.experiment_json(run.config_hash) is not None
-    assert "done: ran 50 steps" in capsys.readouterr().out
+    assert "done: ran 16 steps" in capsys.readouterr().out
 
 
 def test_running_it_again_does_nothing(home, capsys):
@@ -61,12 +61,19 @@ def test_runtime_settings_do_not_change_the_run(home, capsys):
 def test_overrides_make_a_different_experiment(home):
     main(["run", str(HELLO), "model=ladder_s/m2"])
     (run,) = Registry.sqlite(home / "registry.db").list_runs()
-    assert run.config_hash != "bbf7148085e02220"
+    assert run.config_hash != "7a76134cf42d7eaf"
 
 
 @pytest.mark.parametrize(
     "bad",
-    ["model.n_layer=6", "nonsense", "model=ladder_s/m9", "seed=-1", "runtime.colour=red"],
+    [
+        "model.n_layer=6",
+        "nonsense",
+        "model=ladder_s/m9",
+        "seed=-1",
+        "runtime.colour=red",
+        "task.difficulties=[13]",
+    ],
 )
 def test_bad_input_is_one_clear_error_and_records_nothing(home, capsys, bad):
     assert main(["run", str(HELLO), bad]) == 2
@@ -83,13 +90,13 @@ def test_old_registry_file_is_reported_clearly(home, capsys):
 
 
 def test_interrupted_run_resumes_to_the_same_result(home, tmp_path, capsys, monkeypatch):
-    main(["run", str(HELLO), "seed=4"])  # the uninterrupted reference, in `home`
+    longer = ["seed=4", "warm_start.tokens=50000"]  # a few seconds: time for the signal to land
+    main(["run", str(HELLO), *longer])  # the uninterrupted reference, in `home`
     expected = last_loss(capsys.readouterr().out)
 
     other_home = tmp_path / "interrupted"
     job = subprocess.Popen(
-        [sys.executable, "-u", "-m", "scalelab.cli", "run", str(HELLO), "seed=4"]
-        + ["--step-seconds", "0.05"],
+        [sys.executable, "-u", "-m", "scalelab.cli", "run", str(HELLO), *longer],
         env={**os.environ, "SCALELAB_HOME": str(other_home)},
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -107,7 +114,7 @@ def test_interrupted_run_resumes_to_the_same_result(home, tmp_path, capsys, monk
     assert run.status == "running"
 
     monkeypatch.setenv("SCALELAB_HOME", str(other_home))  # now resume it, in-process
-    assert main(["run", str(HELLO), "seed=4"]) == 0
+    assert main(["run", str(HELLO), *longer]) == 0
     output = capsys.readouterr().out
     assert "resuming (it was running)" in output
     assert last_loss(output) == expected

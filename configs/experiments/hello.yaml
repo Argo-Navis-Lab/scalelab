@@ -1,6 +1,9 @@
-# The smallest experiment: model m1 on 4-digit arithmetic.
+# The smallest experiment: a short warm start of model m1 on arithmetic.
 defaults:
   - model: ladder_s/m1
   - task: arithmetic
 
 name: hello
+warm_start:
+  tokens: 20000  # a smoke test: a real warm start reads 100 million
+  batch_size: 16

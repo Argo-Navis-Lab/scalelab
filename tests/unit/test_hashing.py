@@ -37,7 +37,7 @@ def test_field_order_in_code_does_not_change_hash():
 
 def test_reordered_keys_give_same_hash(raw):
     reordered = {
-        "task": {"max_digits": 4, "name": "arithmetic"},
+        "task": {"difficulties": [2, 3, 4, 5], "name": "arithmetic"},
         "model": {"n_heads": 2, "d_model": 128, "n_layers": 4, "name": "m1"},
         "name": "hello",
     }
@@ -61,8 +61,9 @@ def test_written_out_defaults_give_same_hash(raw):
     [
         ("model", "n_layers", 5),
         ("model", "attn", "gqa"),
-        ("task", "max_digits", 5),
+        ("task", "difficulties", [2, 3]),
         ("optim", "lr", 1e-3),
+        ("warm_start", "tokens", 1000),
     ],
 )
 def test_one_value_change_gives_different_hash(raw, section, key, value):

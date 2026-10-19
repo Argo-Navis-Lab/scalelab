@@ -21,9 +21,10 @@ def configs(tmp_path):
         folder.mkdir(parents=True)
     (models / "tiny.yaml").write_text("name: tiny\nn_layers: 2\nd_model: 64\nn_heads: 1\n")
     (models / "wide.yaml").write_text("name: wide\nn_layers: 2\nd_model: 256\nn_heads: 4\n")
-    (tasks / "arithmetic.yaml").write_text("name: arithmetic\nmax_digits: 4\n")
+    (tasks / "arithmetic.yaml").write_text("name: arithmetic\ndifficulties: [2, 3]\n")
     (root / "experiments" / "exp.yaml").write_text(
-        "defaults:\n  - model: tiny\n  - task: arithmetic\n\nname: exp\ntask:\n  max_digits: 6\n"
+        "defaults:\n  - model: tiny\n  - task: arithmetic\n\n"
+        "name: exp\ntask:\n  difficulties: [6]\n"
     )
     return root
 
@@ -32,11 +33,10 @@ def configs(tmp_path):
 
 
 def test_hello_hash_is_pinned():
-    # Golden value: composing hello from separate files must not change what it is.
-    # If this changes, every past hello run becomes a different experiment. Say so loudly.
-    # Changed on purpose in M1 step 12, when ModelConfig gained context and qk_norm
-    # (it was 3f7ffa68d30146bd).
-    assert config_hash(load_config(HELLO)) == "bbf7148085e02220"
+    # Changed on purpose in 'm1s12', when ModelConfig gained context and qk_norm
+    # (it was 3f7ffa68d30146bd), and in 'm1s20', when experiments gained warm_start and
+    # tasks their difficulties (it was bbf7148085e02220).
+    assert config_hash(load_config(HELLO)) == "7a76134cf42d7eaf"
 
 
 @pytest.mark.parametrize("name", ["m1", "m2", "m3", "m4", "m5", "m6", "m7"])
@@ -57,12 +57,12 @@ def test_defaults_fill_in_whole_sections(configs):
 
 def test_the_file_overrides_its_defaults_value_by_value(configs):
     composed = compose_config(configs / "experiments" / "exp.yaml")
-    assert composed["task"] == {"name": "arithmetic", "max_digits": 6}  # name kept, digits changed
+    assert composed["task"] == {"name": "arithmetic", "difficulties": [6]}  # name kept
 
 
 def test_command_line_overrides_win_over_everything(configs):
-    config = load_config(configs / "experiments" / "exp.yaml", ["task.max_digits=8"])
-    assert config.task.max_digits == 8
+    config = load_config(configs / "experiments" / "exp.yaml", ["task.difficulties=[8]"])
+    assert config.task.difficulties == (8,)
 
 
 def test_choosing_a_different_group_file(configs):

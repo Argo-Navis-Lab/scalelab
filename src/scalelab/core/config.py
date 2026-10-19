@@ -44,9 +44,26 @@ class ModelConfig(StrictModel):
         return (8 * self.d_model + 95) // 96 * 32
 
 
+# The difficulty levels each task can make: arithmetic's digits, Countdown's numbers. They
+# repeat the tasks' own limits, so a bad level is caught when the config is read (a test
+# keeps the two in step).
+DIFFICULTIES = {"arithmetic": range(2, 13), "countdown": range(3, 7)}
+
+
 class TaskConfig(StrictModel):
     name: Literal["arithmetic", "countdown"]
-    max_digits: int = Field(default=4, ge=2, le=12)
+    difficulties: tuple[int, ...] = Field(min_length=1)  # each problem's level, drawn evenly
+
+    @model_validator(mode="after")
+    def check_difficulties(self) -> "TaskConfig":
+        allowed = DIFFICULTIES[self.name]
+        wrong = [d for d in self.difficulties if d not in allowed]
+        if wrong:
+            raise ValueError(
+                f"{self.name} difficulties run from {allowed.start} to {allowed.stop - 1}, "
+                f"got {wrong}"
+            )
+        return self
 
 
 class OptimConfig(StrictModel):
@@ -73,6 +90,7 @@ class ExperimentConfig(StrictModel):
     model: ModelConfig
     task: TaskConfig
     optim: OptimConfig = Field(default_factory=OptimConfig)
+    warm_start: WarmStartConfig = Field(default_factory=WarmStartConfig)
 
 
 class RuntimeConfig(StrictModel):

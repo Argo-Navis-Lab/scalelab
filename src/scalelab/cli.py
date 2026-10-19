@@ -11,12 +11,11 @@ from scalelab.core import hashing
 from scalelab.core.checkpoint import CheckpointPolicy
 from scalelab.core.config import RuntimeConfig, load_config, parse_override
 from scalelab.core.determinism import MAX_SEED, default_deterministic
-from scalelab.core.dummy_job import run_dummy_job
 from scalelab.core.envcapture import EnvInfo, capture_env
 from scalelab.core.registry import OutdatedRegistryError, Registry
 from scalelab.core.storage import registry_path, scalelab_home
+from scalelab.rl.experiment import run_experiment
 
-DUMMY_STEPS = 50  # the dummy job's length, until real experiments bring a step budget
 EXIT_USAGE = 2  # the command line asked for something impossible
 EXIT_INTERRUPTED = 130  # stopped early with a checkpoint saved; run again to resume
 
@@ -49,7 +48,7 @@ def same_uncommitted_changes(recorded_env_json: str, env: EnvInfo) -> bool:
     return recorded.git.diff_sha256 == env.git.diff_sha256
 
 
-def run(experiment: Path, overrides: Sequence[str], step_seconds: float = 0.0) -> int:
+def run(experiment: Path, overrides: Sequence[str]) -> int:
     """`scalelab run`: resolve the experiment, record it, run it (or resume it), finish it."""
     try:
         seed, runtime_values, config_overrides = split_overrides(overrides)
@@ -96,13 +95,12 @@ def run(experiment: Path, overrides: Sequence[str], step_seconds: float = 0.0) -
             registry.reopen_run(run_id)
             print(f"resuming (it was {existing.status})")
         try:
-            losses = run_dummy_job(
+            metrics = run_experiment(
+                config,
                 seed,
-                DUMMY_STEPS,
                 home / "checkpoints" / run_id,
                 home=home,
                 policy=policy,
-                step_seconds=step_seconds,
                 deterministic=deterministic,
             )
         except Exception:
@@ -116,8 +114,14 @@ def run(experiment: Path, overrides: Sequence[str], step_seconds: float = 0.0) -
         print("stopped early, checkpoint saved: run the same command again to resume")
         return EXIT_INTERRUPTED
     registry.finish_run(run_id, "done")
-    last = losses[-1] if losses else None
-    print(f"done: ran {len(losses)} steps, last loss {last!r}")
+    if not metrics:
+        print("done: the last checkpoint was already saved, so there was nothing left to train")
+        return 0
+    last = metrics[-1]
+    print(
+        f"done: ran {len(metrics)} steps ({last.tokens:,} tokens and {last.flops:.2e} FLOPs "
+        f"in all), last loss {last.loss!r}"
+    )
     return 0
 
 
@@ -129,14 +133,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_parser.add_argument(
         "overrides",
         nargs="*",
-        help="key=value changes, e.g. seed=2 model=ladder_s/m2 optim.lr=1e-3 runtime.output_dir=x",
-    )
-    run_parser.add_argument(
-        "--step-seconds", type=float, default=0.0, help="slow the dummy job down (to try Ctrl+C)"
+        help="key=value changes, e.g. seed=2 model=ladder_s/m2 warm_start.lr=3e-4",
     )
     args = parser.parse_args(argv)
     try:
-        return run(args.experiment, args.overrides, args.step_seconds)
+        return run(args.experiment, args.overrides)
     except UsageError as err:
         print(f"scalelab: error: {err}", file=sys.stderr)
         return EXIT_USAGE

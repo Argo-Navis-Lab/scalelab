@@ -6,7 +6,8 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from scalelab.core.config import ExperimentConfig, OptimConfig, load_config
+from scalelab.core.config import DIFFICULTIES, ExperimentConfig, OptimConfig, load_config
+from scalelab.tasks import arithmetic, countdown
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELLO_YAML = REPO_ROOT / "configs" / "experiments" / "hello.yaml"
@@ -17,6 +18,12 @@ def test_hello_yaml_loads_with_defaults_filled():
     assert config.name == "hello"
     assert config.model.attn == "mha"  # default filled in
     assert config.optim == OptimConfig()  # whole missing section filled in
+
+
+def test_hello_is_a_short_warm_start_on_every_arithmetic_band():
+    config = load_config(HELLO_YAML)
+    assert (config.warm_start.tokens, config.warm_start.batch_size) == (20_000, 16)
+    assert config.task.difficulties == (2, 3, 4, 5)  # from configs/tasks/arithmetic.yaml
 
 
 def test_head_dim_is_width_over_heads(config):
@@ -71,11 +78,27 @@ def test_runtime_fields_cannot_sneak_into_experiment_config(raw):
         ("model", "attn", "flash"),
         ("model", "context", 0),
         ("task", "name", "chess"),
-        ("task", "max_digits", 1),
-        ("task", "max_digits", 13),
+        ("task", "difficulties", []),
+        ("task", "difficulties", [1]),
+        ("task", "difficulties", [2, 13]),
     ],
 )
 def test_out_of_range_values_are_rejected(raw, section, key, bad_value):
     raw[section][key] = bad_value
     with pytest.raises(ValidationError):
+        ExperimentConfig.model_validate(raw)
+
+
+# --- task difficulties ----------------------------------------------------------------------
+
+
+def test_the_difficulty_limits_are_the_tasks_own():
+    assert DIFFICULTIES["arithmetic"] == range(arithmetic.MIN_DIGITS, arithmetic.MAX_DIGITS + 1)
+    assert DIFFICULTIES["countdown"] == range(countdown.MIN_NUMBERS, countdown.MAX_NUMBERS + 1)
+
+
+def test_a_bad_difficulty_is_named_with_the_tasks_limits(raw: dict[str, Any]):
+    raw["task"] = {"name": "countdown", "difficulties": [2, 3, 7]}
+    message = r"countdown difficulties run from 3 to 6, got \[2, 7\]"  # \[ is a plain "["
+    with pytest.raises(ValidationError, match=message):
         ExperimentConfig.model_validate(raw)

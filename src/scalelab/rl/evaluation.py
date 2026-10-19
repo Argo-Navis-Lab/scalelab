@@ -9,12 +9,9 @@ from torch import Tensor
 
 from scalelab.core.config import StrictModel
 from scalelab.models.transformer import Transformer
+from scalelab.rl.sampling import NEVER_WRITTEN
 from scalelab.tasks.base import Task
-from scalelab.tasks.tokenizer import BOS, EOS, PAD, VOCAB, VOCAB_SIZE, decode
-
-# Tokens the model may never write: padding, a second <bos>, and the embedding rows that no
-# token uses yet (step 1 left room for more symbols). An untrained model could pick any.
-NEVER_WRITTEN = [PAD, BOS, *range(len(VOCAB), VOCAB_SIZE)]
+from scalelab.tasks.tokenizer import EOS, decode
 
 
 class EvalResult(StrictModel):

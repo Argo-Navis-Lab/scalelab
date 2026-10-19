@@ -90,6 +90,14 @@ class EvalConfig(StrictModel):
     problems: int = Field(default=1000, gt=0)  # the first this many of each eval set
 
 
+class SamplingParams(StrictModel):
+    """How a rollout picks each next token: drawn at random from the model's probabilities,
+    made sharper or flatter by the temperature. (Greedy decoding, always the likeliest token,
+    is grading's job and needs no settings.)"""
+
+    temperature: float = Field(default=1.0, gt=0)  # below 1 sharper, above 1 flatter
+
+
 class ExperimentConfig(StrictModel):
     """Everything that defines WHAT the experiment is. This gets hashed."""
 

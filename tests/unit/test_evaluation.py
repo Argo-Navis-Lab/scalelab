@@ -10,13 +10,13 @@ import torch.nn.functional as F
 from scalelab.core.config import ModelConfig
 from scalelab.models.transformer import Transformer
 from scalelab.rl.evaluation import (
-    NEVER_WRITTEN,
     EvalResult,
     evaluate,
     evaluate_by,
     generate_greedy,
     standard_error,
 )
+from scalelab.rl.sampling import NEVER_WRITTEN
 from scalelab.tasks.arithmetic import ArithmeticProblem, ArithmeticTask
 from scalelab.tasks.countdown import CountdownProblem, CountdownTask
 from scalelab.tasks.evalsets import read_eval_set

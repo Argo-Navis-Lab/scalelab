@@ -10,8 +10,9 @@ from torch import Tensor
 from scalelab.core.config import StrictModel
 from scalelab.models.transformer import Transformer
 from scalelab.rl.sampling import NEVER_WRITTEN
+from scalelab.rl.scoring import completion_text
 from scalelab.tasks.base import Task
-from scalelab.tasks.tokenizer import EOS, decode
+from scalelab.tasks.tokenizer import EOS
 
 
 class EvalResult(StrictModel):
@@ -63,8 +64,7 @@ def evaluate[P](model: Transformer, task: Task[P], problems: Sequence[P], name: 
     completions = generate_greedy(model, [task.format_prompt(p) for p in problems])
     passed = 0
     for problem, tokens in zip(problems, completions, strict=True):
-        text = decode(tokens[:-1] if tokens[-1:] == [EOS] else tokens)  # the text before <eos>
-        if task.score(problem, text).value == 1.0:
+        if task.score(problem, completion_text(tokens)).value == 1.0:
             passed += 1
     return EvalResult(name=name, n=len(problems), passed=passed)
 

@@ -36,5 +36,7 @@ def test_its_shell_cells_are_valid_bash():
 
 
 def test_the_live_registry_stays_off_google_drive():
-    (run,) = [source for source in code_cells() if "scalelab run" in source]
-    assert "runtime.local_registry=/content/registry.db" in run
+    runs = [source for source in code_cells() if "scalelab run" in source]
+    assert runs  # at least one cell runs scalelab
+    for run in runs:
+        assert "runtime.local_registry=/content/registry.db" in run

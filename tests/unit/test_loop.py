@@ -155,3 +155,28 @@ def test_on_step_sees_each_steps_metrics_before_it_is_saved(tmp_path: Path):
     )
     assert [m for m, _ in seen] == metrics
     assert not any(saved for _, saved in seen)  # not even the last step, which is always saved
+
+
+# --- added in m2s24: a step limit -----------------------------------------------------------
+
+
+def test_max_steps_ends_a_run_before_its_budget(tmp_path: Path):
+    def session() -> list[RLStepMetrics]:
+        seeds = seed_everything(0, deterministic=True)
+        return rl_train(
+            Transformer(TINY),
+            Hurry(),
+            [2],
+            preset("rloo"),
+            RLConfig.model_validate(SETTINGS | {"flops": 1e15, "max_steps": 3}),
+            np.random.default_rng(seeds.data),
+            torch.Generator().manual_seed(seeds.sampling),
+            tmp_path / "ckpt",
+            tmp_path,
+        )
+
+    metrics = session()
+    assert [m.step for m in metrics] == [1, 2, 3]
+    assert metrics[-1].flops < 1e15  # most of the budget is left
+    assert (tmp_path / "ckpt" / "step-000000003.json").exists()  # the last step is saved
+    assert session() == []  # and the run counts as finished

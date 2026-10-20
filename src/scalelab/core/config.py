@@ -148,6 +148,9 @@ class RLConfig(StrictModel):
     # reference its KL penalty measures against.
     from_run: str = Field(pattern=RUN_ID)
     flops: float = Field(gt=0)  # the budget: sampling, log-probs and training, counted by A
+    # Stop after this many steps even if FLOPs are left (smoke tests and probes); None: the
+    # FLOP budget alone decides.
+    max_steps: int | None = Field(default=None, gt=0)
     prompts_per_step: int = Field(default=64, gt=0)  # problems drawn each step
     group_size: int = Field(default=8, ge=2)  # answers to each problem, compared to each other
     sampling: SamplingParams = Field(default_factory=SamplingParams)

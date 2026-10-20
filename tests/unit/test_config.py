@@ -210,3 +210,13 @@ def test_from_run_takes_any_run_id(config: ExperimentConfig):
 def test_impossible_rl_settings_are_refused(change: dict[str, Any]):
     with pytest.raises(ValidationError):
         RLConfig.model_validate(RL | change)
+
+
+# --- added in m2s24: a step limit -----------------------------------------------------------
+
+
+def test_an_rl_run_has_no_step_limit_unless_asked():
+    assert RLConfig.model_validate(RL).max_steps is None
+    assert RLConfig.model_validate(RL | {"max_steps": 20}).max_steps == 20
+    with pytest.raises(ValidationError):
+        RLConfig.model_validate(RL | {"max_steps": 0})

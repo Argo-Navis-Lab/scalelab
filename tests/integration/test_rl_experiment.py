@@ -106,3 +106,22 @@ def test_a_warm_start_experiment_is_not_run_as_rl(tmp_path: Path):
     hello = load_config(EXPERIMENTS / "hello.yaml")
     with pytest.raises(ValueError, match="hello is not an RL experiment"):
         run_rl_experiment(hello, 0, warm_start(hello.model), tmp_path / "a", tmp_path)
+
+
+# --- added in m2s24: a step limit -----------------------------------------------------------
+
+
+def test_a_step_limit_ends_the_run_with_its_last_grading(tmp_path: Path):
+    limited = load_config(EXPERIMENTS / "rl.yaml", [*SMALL, "rl.flops=1e15", "rl.max_steps=3"])
+    gradings: list[int] = []
+
+    def report(
+        metrics: RLStepMetrics | None, greedy: list[EvalResult], sampled: list[SampledResult]
+    ) -> None:
+        gradings.append(0 if metrics is None else metrics.step)
+
+    metrics = run_rl_experiment(
+        limited, 0, warm_start(limited.model), tmp_path / "a", tmp_path, report=report
+    )
+    assert len(metrics) == 3
+    assert gradings == [0, 2, 3]  # eval.every 2, and the last step

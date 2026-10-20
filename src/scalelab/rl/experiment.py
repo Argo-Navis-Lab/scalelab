@@ -20,7 +20,7 @@ from scalelab.rl.evaluation import (
     evaluate_by,
     evaluate_sampled,
 )
-from scalelab.rl.loop import RLStepMetrics, rl_train
+from scalelab.rl.loop import RLStepMetrics, budget_spent, rl_train
 from scalelab.rl.warmstart import eval_prompts
 from scalelab.rl.warmstart_loop import StepMetrics, warm_start
 from scalelab.tasks.arithmetic import ArithmeticProblem, ArithmeticTask
@@ -180,7 +180,7 @@ def run_rl_experiment(
         if report is None:
             return
         if metrics is not None:  # step 0 is always graded; later steps when due, and the last
-            last = metrics.flops >= rl.flops
+            last = budget_spent(rl, metrics.step, metrics.flops)
             due = config.eval.every > 0 and metrics.step % config.eval.every == 0
             if not (last or due):
                 return

@@ -33,4 +33,4 @@ jobs:
         run: uv run pyright
 
       - name: Tests (pytest)
-        run: uv run pytest
+        run: uv run pytest --durations=5 # and list the 5 slowest tests, the RL smoke test among them

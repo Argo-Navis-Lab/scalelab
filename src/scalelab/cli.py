@@ -242,7 +242,10 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
         else:
             if last_flops is not None and now > last_time and config.rl is not None:
                 done = metrics.flops - last_flops  # FLOPs spent since the last grading
-                pace = f"  ({flops_speed(done, now - last_time, metrics.flops, config.rl.flops)})"
+                end = config.rl.flops  # where the run will end, in FLOPs: its budget, or...
+                if config.rl.max_steps is not None:  # ...max_steps, at the FLOPs a step so far
+                    end = min(end, metrics.flops / metrics.step * config.rl.max_steps)
+                pace = f"  ({flops_speed(done, now - last_time, metrics.flops, end)})"
             last_flops = metrics.flops
             print(f"step {metrics.step:,}: reward {metrics.reward:.3f}  {rates}{pace}")
         last_time = now

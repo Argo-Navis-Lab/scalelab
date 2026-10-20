@@ -44,6 +44,12 @@ class RLStepMetrics(StrictModel):
     kl: float
 
 
+def budget_spent(config: RLConfig, step: int, flops: float) -> bool:
+    """Whether a run that has taken `step` steps and spent `flops` FLOPs is finished: its FLOP
+    budget is spent, or it has taken config.max_steps steps."""
+    return flops >= config.flops or (config.max_steps is not None and step >= config.max_steps)
+
+
 def sample_problems[P](
     task: Task[P],
     rng: np.random.Generator,
@@ -79,8 +85,8 @@ def rl_train[P](
     stop_after: int | None = None,
     on_step: Callable[[RLStepMetrics], None] | None = None,
 ) -> list[RLStepMetrics]:
-    """Train `model` with RL until config.flops FLOPs have been spent, resuming from the
-    latest checkpoint in `checkpoint_dir` if there is one.
+    """Train `model` with RL until config.flops FLOPs have been spent (or config.max_steps
+    steps taken), resuming from the latest checkpoint in `checkpoint_dir` if there is one.
 
     Each step draws config.prompts_per_step problems with `data_rng`, samples
     config.group_size answers to each with `generator` (on the model's device), scores
@@ -109,7 +115,7 @@ def rl_train[P](
         flops = state["flops"]
 
     metrics: list[RLStepMetrics] = []
-    while flops < config.flops:
+    while not budget_spent(config, step, flops):
         problems = sample_problems(task, data_rng, config.prompts_per_step, difficulties, excluded)
         prompts = [task.format_prompt(problem) for problem in problems]
         batch = generate(
@@ -170,7 +176,7 @@ def rl_train[P](
             on_step(metrics[-1])
         if step == stop_after:
             policy.request_stop()
-        if flops >= config.flops or policy.due(step):
+        if budget_spent(config, step, flops) or policy.due(step):
             state = {
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),

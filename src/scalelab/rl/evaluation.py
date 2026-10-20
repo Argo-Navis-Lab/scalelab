@@ -1,16 +1,18 @@
-"""Greedy generation and pass@1 evaluation: the first time a model gets graded."""
+"""Grading a model: greedy pass@1, and sampled pass@k from several answers to each problem."""
 
 import math
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 
 import torch
+from pydantic import Field
 from torch import Tensor
 
-from scalelab.core.config import StrictModel
+from scalelab.core.config import SamplingParams, StrictModel
 from scalelab.models.transformer import Transformer
+from scalelab.rl.rollout import generate
 from scalelab.rl.sampling import NEVER_WRITTEN
-from scalelab.rl.scoring import completion_text
+from scalelab.rl.scoring import completion_text, score_rollouts
 from scalelab.tasks.base import Task
 from scalelab.tasks.tokenizer import EOS
 
@@ -91,6 +93,65 @@ def evaluate_by[P](
     n = sum(result.n for result in results)
     passed = sum(result.passed for result in results)
     return [EvalResult(name=name, n=n, passed=passed), *results]
+
+
+# --- sampled pass@k -------------------------------------------------------------------------
+
+
+def pass_at_k(n: int, c: int, k: int) -> float:
+    """The unbiased estimate of pass@k from n answers to one problem, c of them right: the
+    chance that k answers picked at random from the n include a right one,
+    1 - C(n - c, k) / C(n, k) (Chen et al., 2021). With k = 1 it is c / n."""
+    if not 0 <= c <= n or not 1 <= k <= n:
+        raise ValueError(f"pass@k needs 0 <= c <= n and 1 <= k <= n, got n={n}, c={c}, k={k}")
+    return 1.0 - math.comb(n - c, k) / math.comb(n, k)
+
+
+class SampledResult(StrictModel):
+    """Sampled answers to one eval set: correct[i] of the `samples` answers drawn for problem
+    i were right. The counts are the stored truth; pass@k comes from them."""
+
+    name: str  # the eval set, such as "arithmetic-3"
+    samples: int = Field(gt=0)  # answers drawn for each problem
+    correct: tuple[int, ...] = Field(min_length=1)  # one count per problem
+
+    @property
+    def n(self) -> int:
+        return len(self.correct)
+
+    def pass_at(self, k: int) -> float:
+        """pass@k averaged over the problems, each problem's estimated by pass_at_k."""
+        return sum(pass_at_k(self.samples, c, k) for c in self.correct) / self.n
+
+    def stderr(self, k: int) -> float:
+        """How much pass_at(k) wobbles: the spread of the problems' own estimates, divided by
+        sqrt(n). With one sample per problem and k = 1, it is standard_error's binomial one."""
+        values = [pass_at_k(self.samples, c, k) for c in self.correct]
+        mean = sum(values) / self.n
+        variance = sum((value - mean) ** 2 for value in values) / self.n
+        return math.sqrt(variance / self.n)
+
+
+def evaluate_sampled[P](
+    model: Transformer,
+    task: Task[P],
+    problems: Sequence[P],
+    name: str,
+    generator: torch.Generator,
+    samples: int = 4,
+    temperature: float = 1.0,
+) -> SampledResult:
+    """Draw `samples` answers to each problem at `temperature`, and count each problem's
+    right ones. Every draw comes from `generator` (on the model's device), so grading never
+    moves the random state that training uses."""
+    prompts = [task.format_prompt(problem) for problem in problems]
+    batch = generate(model, prompts, samples, SamplingParams(temperature=temperature), generator)
+    rewards = score_rollouts(task, problems, batch)
+    correct = [0] * len(problems)
+    for group, reward in zip(batch.group_ids.tolist(), rewards, strict=True):
+        if reward.value == 1.0:
+            correct[group] += 1
+    return SampledResult(name=name, samples=samples, correct=tuple(correct))
 
 
 def _generate_batch(model: Transformer, prompts: list[Sequence[int]]) -> list[list[int]]:

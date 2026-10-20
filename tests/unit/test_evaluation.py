@@ -1,4 +1,5 @@
-"""Generation and evaluation tests: greedy answers, batching by length, pass rates."""
+"""Generation and evaluation tests: greedy answers, batching by length, pass rates, and
+sampled pass@k with its unbiased estimator."""
 
 import math
 
@@ -11,9 +12,12 @@ from scalelab.core.config import ModelConfig
 from scalelab.models.transformer import Transformer
 from scalelab.rl.evaluation import (
     EvalResult,
+    SampledResult,
     evaluate,
     evaluate_by,
+    evaluate_sampled,
     generate_greedy,
+    pass_at_k,
     standard_error,
 )
 from scalelab.rl.sampling import NEVER_WRITTEN
@@ -160,3 +164,81 @@ def test_an_eval_result_derives_its_rate_and_error_from_its_counts():
     result = EvalResult(name="arithmetic-3", n=1000, passed=250)
     assert result.pass_rate == 0.25
     assert result.stderr == pytest.approx(0.0137, abs=1e-4)  # sqrt(0.25 * 0.75 / 1000)
+
+
+# --- sampled pass@k (added in m2s20) --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("n", "c", "k", "expected"),
+    [
+        (4, 0, 1, 0.0),
+        (4, 1, 1, 0.25),  # with k = 1: simply c / n
+        (4, 3, 1, 0.75),
+        (4, 4, 1, 1.0),
+        (4, 1, 2, 0.5),  # 1 - C(3, 2) / C(4, 2) = 1 - 3/6
+        (4, 2, 2, 5 / 6),  # 1 - C(2, 2) / C(4, 2) = 1 - 1/6
+        (4, 1, 4, 1.0),  # all four picked: the right one is among them
+        (4, 0, 4, 0.0),
+        (10, 3, 5, 11 / 12),  # 1 - C(7, 5) / C(10, 5) = 1 - 21/252
+    ],
+)
+def test_pass_at_k_by_hand(n: int, c: int, k: int, expected: float):
+    assert pass_at_k(n, c, k) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    ("n", "c", "k"),
+    [(4, 5, 1), (4, -1, 1), (4, 1, 0), (4, 1, 5)],
+    ids=["more-right-than-drawn", "negative", "k-zero", "k-above-n"],
+)
+def test_impossible_counts_are_refused(n: int, c: int, k: int):
+    with pytest.raises(ValueError, match="pass@k needs"):
+        pass_at_k(n, c, k)
+
+
+@pytest.mark.parametrize("p", [0.1, 0.5, 0.9])
+@pytest.mark.parametrize("k", [1, 2, 3, 4])
+def test_the_estimator_is_unbiased(p: float, k: int):
+    # When each answer is right with chance p, the number right of 4 is binomial. Averaged
+    # over every possible count, the estimate is exactly the true pass@k, 1 - (1 - p)^k.
+    expected = sum(
+        math.comb(4, c) * p**c * (1 - p) ** (4 - c) * pass_at_k(4, c, k) for c in range(5)
+    )
+    assert expected == pytest.approx(1 - (1 - p) ** k)
+
+
+def test_a_sampled_result_derives_pass_at_k_from_its_counts():
+    result = SampledResult(name="arithmetic-3", samples=4, correct=(4, 0, 2, 1))
+    assert result.n == 4
+    assert result.pass_at(1) == pytest.approx(7 / 16)  # 7 right answers of 16
+    assert result.pass_at(4) == pytest.approx(3 / 4)  # 3 problems with at least one right
+
+
+def test_with_one_sample_it_is_greedy_style_counting():
+    sampled = SampledResult(name="x", samples=1, correct=(1,) * 250 + (0,) * 750)
+    greedy = EvalResult(name="x", n=1000, passed=250)
+    assert sampled.pass_at(1) == pytest.approx(greedy.pass_rate)
+    assert sampled.stderr(1) == pytest.approx(greedy.stderr)
+
+
+def test_near_zero_temperature_sampling_is_greedy(
+    memorized: tuple[Transformer, list[ArithmeticProblem]],
+):
+    model, problems = memorized  # its top tokens lead by 6.29 logits at least: x 20 at T 0.05
+    generator = torch.Generator().manual_seed(0)
+    result = evaluate_sampled(model, TASK, problems, "memorized", generator, temperature=0.05)
+    assert result == SampledResult(name="memorized", samples=4, correct=(4, 4, 4, 4))
+
+
+def test_sampled_grading_draws_only_from_its_own_generator(
+    memorized: tuple[Transformer, list[ArithmeticProblem]],
+):
+    model, problems = memorized
+    before = torch.get_rng_state()
+    first = evaluate_sampled(model, TASK, problems, "m", torch.Generator().manual_seed(1))
+    again = evaluate_sampled(model, TASK, problems, "m", torch.Generator().manual_seed(1))
+    assert first == again  # the same generator state draws the same answers
+    assert torch.equal(torch.get_rng_state(), before)  # training's random state is untouched
+    assert (first.n, first.samples) == (4, 4)
+    assert all(0 <= c <= 4 for c in first.correct)

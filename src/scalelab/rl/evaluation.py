@@ -131,6 +131,23 @@ class SampledResult(StrictModel):
         variance = sum((value - mean) ** 2 for value in values) / self.n
         return math.sqrt(variance / self.n)
 
+    def by_part[P](self, problems: Sequence[P], key: Callable[[P], str]) -> list["SampledResult"]:
+        """This result, then one per part of its problems, as evaluate_by splits greedy grades:
+        `key` labels each problem, a part is named "<name>/<label>", and parts come in the
+        sorted order of their labels. `problems` are the ones graded, in the same order."""
+        if len(problems) != self.n:
+            raise ValueError(f"{self.n} problems were graded, but {len(problems)} were given")
+        parts: dict[str, list[int]] = defaultdict(list)  # label -> those problems' counts
+        for problem, count in zip(problems, self.correct, strict=True):
+            parts[key(problem)].append(count)
+        results: list[SampledResult] = [self]
+        for label in sorted(parts):
+            counts = tuple(parts[label])
+            results.append(
+                SampledResult(name=f"{self.name}/{label}", samples=self.samples, correct=counts)
+            )
+        return results
+
 
 def evaluate_sampled[P](
     model: Transformer,

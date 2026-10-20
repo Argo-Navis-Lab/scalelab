@@ -242,3 +242,30 @@ def test_sampled_grading_draws_only_from_its_own_generator(
     assert torch.equal(torch.get_rng_state(), before)  # training's random state is untouched
     assert (first.n, first.samples) == (4, 4)
     assert all(0 <= c <= 4 for c in first.correct)
+
+
+# --- sampled grades by part (added in m2s21) ------------------------------------------------
+
+
+def test_sampled_grades_split_by_part_like_greedy_ones():
+    problems = read_eval_set("arithmetic-2", ArithmeticProblem)[:10]  # 3 "*", 5 "+", 2 "-"
+    counts = tuple(i % 5 for i in range(10))  # made-up counts: 0, 1, 2, 3, 4, 0, 1, ...
+    whole = SampledResult(name="arithmetic-2", samples=4, correct=counts)
+    parts = whole.by_part(problems, key=lambda p: p.op)
+    assert [p.name for p in parts] == [
+        "arithmetic-2",
+        "arithmetic-2/*",
+        "arithmetic-2/+",
+        "arithmetic-2/-",
+    ]
+    assert parts[0] == whole
+    for part, op in zip(parts[1:], "*+-", strict=True):  # each problem keeps its own count
+        assert part.correct == tuple(c for p, c in zip(problems, counts, strict=True) if p.op == op)
+    assert sum(sum(part.correct) for part in parts[1:]) == sum(counts)
+
+
+def test_splitting_needs_the_problems_that_were_graded():
+    whole = SampledResult(name="x", samples=4, correct=(1, 2, 3))
+    problems = read_eval_set("arithmetic-2", ArithmeticProblem)[:2]
+    with pytest.raises(ValueError, match="3 problems were graded, but 2 were given"):
+        whole.by_part(problems, key=lambda p: p.op)

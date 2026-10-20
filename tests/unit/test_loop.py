@@ -128,3 +128,30 @@ def test_with_nothing_to_learn_nothing_changes(tmp_path: Path):
     assert {(m.reward, m.trained, m.loss, m.grad_norm) for m in metrics} == {(0.0, 0, 0.0, 0.0)}
     weights, now = before.state_dict(), after.state_dict()
     assert all(torch.equal(weights[name], now[name]) for name in weights)
+
+
+# --- added in m2s21: a hook after each step -------------------------------------------------
+
+
+def test_on_step_sees_each_steps_metrics_before_it_is_saved(tmp_path: Path):
+    seen: list[tuple[RLStepMetrics, bool]] = []
+
+    def on_step(metrics: RLStepMetrics) -> None:
+        saved = (tmp_path / "ckpt" / f"step-{metrics.step:09d}.json").exists()
+        seen.append((metrics, saved))
+
+    seeds = seed_everything(0, deterministic=True)
+    metrics = rl_train(
+        Transformer(TINY),
+        Hurry(),
+        [2],
+        preset("rloo"),
+        RLConfig.model_validate(SETTINGS | {"flops": 5e9}),
+        np.random.default_rng(seeds.data),
+        torch.Generator().manual_seed(seeds.sampling),
+        tmp_path / "ckpt",
+        tmp_path,
+        on_step=on_step,
+    )
+    assert [m for m, _ in seen] == metrics
+    assert not any(saved for _, saved in seen)  # not even the last step, which is always saved

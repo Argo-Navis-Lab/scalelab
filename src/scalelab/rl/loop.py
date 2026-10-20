@@ -1,7 +1,7 @@
 """The RL loop: draw problems, sample answers, score them and learn from them, step after
 step, until the FLOP budget is spent."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -77,6 +77,7 @@ def rl_train[P](
     reference: Transformer | None = None,
     excluded: frozenset[tuple[int, ...]] = frozenset(),
     stop_after: int | None = None,
+    on_step: Callable[[RLStepMetrics], None] | None = None,
 ) -> list[RLStepMetrics]:
     """Train `model` with RL until config.flops FLOPs have been spent, resuming from the
     latest checkpoint in `checkpoint_dir` if there is one.
@@ -88,7 +89,8 @@ def rl_train[P](
 
     Returns the metrics of every step this call ran. Saving follows `policy` (by default:
     every 15 minutes, keeping 2), and the last step is always saved. `stop_after=k`
-    pretends the job is interrupted after step k.
+    pretends the job is interrupted after step k. `on_step`, if given, is called with each
+    step's metrics before any saving.
     """
     policy = policy or CheckpointPolicy()
     optimizer = make_optimizer(model, config)
@@ -164,6 +166,8 @@ def rl_train[P](
                 kl=last.kl if last else 0.0,
             )
         )
+        if on_step is not None:
+            on_step(metrics[-1])
         if step == stop_after:
             policy.request_stop()
         if flops >= config.flops or policy.due(step):

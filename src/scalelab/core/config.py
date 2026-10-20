@@ -102,6 +102,30 @@ class SamplingParams(StrictModel):
     top_p: float = Field(default=1.0, gt=0, le=1)
 
 
+# The names RL's knobs take. The code that does the work (rl/advantages.py, rl/losses.py)
+# uses these same types, so a config can't name something the code can't do.
+Estimator = Literal["grpo", "dr_grpo", "rloo"]
+Normalizer = Literal["seq_mean", "token_mean", "constant"]
+Overlong = Literal["none", "truncate_mask", "soft_penalty"]
+
+
+class AlgoConfig(StrictModel):
+    """One RL algorithm, as a setting of the unified loss's knobs. GRPO, Dr. GRPO, RLOO and
+    the DAPO-style preset are files in configs/algos/ that set them differently."""
+
+    name: str
+    estimator: Estimator  # how a group's rewards become advantages
+    clip_low: float = Field(ge=0, lt=1)  # the ratio's range is [1 - clip_low, 1 + clip_high]
+    clip_high: float = Field(ge=0)
+    normalizer: Normalizer  # how per-token values are averaged into the loss
+    # The constant normalizer divides by rows times this: the longest answer allowed.
+    normalizer_constant: int = Field(default=256, gt=0)
+    kl_coef: float = Field(default=0.0, ge=0)  # beta: the weight of the KL to the reference
+    format_weight: float = Field(default=0.0, ge=0)  # the weight of the reward's format part
+    dynamic_sampling: bool = False  # drop groups whose rewards are all equal
+    overlong: Overlong = "none"  # what happens to answers that run too long
+
+
 class ExperimentConfig(StrictModel):
     """Everything that defines WHAT the experiment is. This gets hashed."""
 

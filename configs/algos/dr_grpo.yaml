@@ -1,0 +1,11 @@
+# Dr. GRPO ("GRPO done right"): no division by the group's spread or by an answer's length,
+# and no KL penalty.
+name: dr_grpo
+estimator: dr_grpo
+clip_low: 0.2
+clip_high: 0.2
+normalizer: constant
+normalizer_constant: 256  # the longest answer allowed: the context
+kl_coef: 0.0
+dynamic_sampling: false
+overlong: none

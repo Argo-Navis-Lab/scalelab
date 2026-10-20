@@ -1,0 +1,9 @@
+# RLOO: each answer is compared with the mean of the other answers to its prompt.
+name: rloo
+estimator: rloo
+clip_low: 0.2
+clip_high: 0.2
+normalizer: seq_mean
+kl_coef: 0.0
+dynamic_sampling: false
+overlong: none

@@ -1,0 +1,10 @@
+# GRPO (DeepSeekMath): advantages scaled by the group's spread, each answer averaged on its
+# own, and a KL penalty that keeps the policy near the warm start.
+name: grpo
+estimator: grpo
+clip_low: 0.2
+clip_high: 0.2
+normalizer: seq_mean
+kl_coef: 0.04
+dynamic_sampling: false
+overlong: none

@@ -1,11 +1,9 @@
 """RL's loss and its pieces, all built from per-token log-probabilities."""
 
-from typing import Literal
-
 import torch
 from torch import Tensor
 
-Normalizer = Literal["seq_mean", "token_mean", "constant"]
+from scalelab.core.config import Normalizer
 
 
 def kl_k3(logp: Tensor, ref_logp: Tensor) -> Tensor:

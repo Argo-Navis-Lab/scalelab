@@ -1,0 +1,10 @@
+# DAPO-style: more room upward when clipping, every token counted alike, groups with nothing
+# to learn from dropped, and a soft penalty for answers that run too long.
+name: dapo
+estimator: grpo
+clip_low: 0.2
+clip_high: 0.28
+normalizer: token_mean
+kl_coef: 0.0
+dynamic_sampling: true
+overlong: soft_penalty

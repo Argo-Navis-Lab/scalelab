@@ -1,11 +1,9 @@
 """Advantages: how much better or worse each answer did than the other answers to its prompt."""
 
-from typing import Literal
-
 import torch
 from torch import Tensor
 
-Estimator = Literal["grpo", "dr_grpo", "rloo"]
+from scalelab.core.config import Estimator
 
 
 def group_size(group_ids: Tensor) -> int:

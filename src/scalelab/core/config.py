@@ -192,6 +192,9 @@ class RuntimeConfig(StrictModel):
     # every change. For Colab, where <home> is on Google Drive: SQLite over the Drive mount
     # is unreliable. None keeps the one registry at <home>/registry.db.
     local_registry: str | None = None
+    # Also save a checkpoint every this many steps. None: only every 15 minutes, when asked
+    # to stop, and at the end.
+    checkpoint_every: int | None = Field(default=None, gt=0)
 
 
 # --- composing a config from several files --------------------------------------------

@@ -247,7 +247,7 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
             print(f"step {metrics.step:,}: reward {metrics.reward:.3f}  {rates}{pace}")
         last_time = now
 
-    policy = CheckpointPolicy()
+    policy = CheckpointPolicy(every_steps=runtime.checkpoint_every)
     previous_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
     policy.stop_on_signals()  # from here on, Ctrl+C and SIGTERM mean "save and stop"
     try:

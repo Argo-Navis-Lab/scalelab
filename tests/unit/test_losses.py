@@ -1,15 +1,16 @@
-"""Loss tests: the k3 KL estimator, against hand-worked values, float32 rounding and the exact
-KL it estimates."""
+"""Loss tests: the k3 KL estimator (against hand-worked values, float32 rounding and the exact
+KL it estimates) and the clipped objective (where clipping engages, and where it doesn't)."""
 
 import math
 
 import pytest
 import torch
 
-from scalelab.rl.losses import kl_k3
+from scalelab.rl.losses import clip_engaged, clipped_objective, kl_k3
 
 P = torch.tensor([0.5, 0.3, 0.2])  # the policy's probabilities for three tokens
 Q = torch.tensor([0.2, 0.3, 0.5])  # the reference's
+CLIP_LOW, CLIP_HIGH = 0.2, 0.28  # the DAPO-style range: [0.8, 1.28]
 
 
 def test_k3_is_0_where_the_policies_agree():
@@ -58,3 +59,42 @@ def test_the_gradient_pulls_the_policy_toward_the_reference():
     # Gradient descent subtracts the gradient: a log-prob above the reference's goes down,
     # one below goes up, and one already equal stays put.
     assert above > 0 and equal == 0 and below < 0
+
+
+# --- the clipped objective ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("ratio", "advantage", "objective", "clipped"),
+    [
+        (1.0, 1.0, 1.0, False),  # nothing has changed yet: the objective is A
+        (1.1, 1.0, 1.1, False),  # inside the range: ratio * A
+        (1.25, 1.0, 1.25, False),  # still inside: the upper edge is 1.28
+        (1.5, 1.0, 1.28, True),  # a good answer pushed past the edge: held there
+        (0.5, 1.0, 0.5, False),  # a good answer made rarer: nothing stops pushing it back up
+        (0.9, -1.0, -0.9, False),  # inside the range
+        (0.5, -1.0, -0.8, True),  # a bad answer already made much rarer: held at 0.8
+        (1.5, -1.0, -1.5, False),  # a bad answer made likelier: nothing stops pulling it back
+    ],
+)
+def test_clipping_engages_only_outside_the_range_and_only_in_the_advantages_direction(
+    ratio: float, advantage: float, objective: float, clipped: bool
+):
+    logp = torch.tensor([[math.log(ratio)]], requires_grad=True)  # old log-prob 0: ratio = e^logp
+    advantages = torch.tensor([advantage])
+    value = clipped_objective(logp.exp(), advantages, CLIP_LOW, CLIP_HIGH)
+    value.sum().backward()
+    assert value.item() == pytest.approx(objective)
+    assert clip_engaged(logp.exp(), advantages, CLIP_LOW, CLIP_HIGH).item() == clipped
+    assert logp.grad is not None
+    assert (logp.grad.item() == 0) == clipped  # a clipped token gets no gradient
+
+
+def test_before_any_update_the_gradient_is_each_rows_advantage():
+    # Ratio 1 everywhere, as in a step's first update: the clipped objective's gradient is
+    # then the plain policy gradient, A for every token of the row.
+    logp = torch.zeros(3, 4, requires_grad=True)  # equal to the old log-probs
+    advantages = torch.tensor([0.5, -1.0, 0.0])
+    clipped_objective(logp.exp(), advantages, CLIP_LOW, CLIP_HIGH).sum().backward()
+    assert logp.grad is not None
+    assert torch.equal(logp.grad, advantages[:, None].expand(3, 4))

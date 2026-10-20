@@ -80,6 +80,8 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
         seed, runtime_values, config_overrides = split_overrides(overrides)
         config = load_config(experiment, config_overrides)
         runtime = RuntimeConfig.model_validate(runtime_values)
+        if config.rl is not None:  # until m2s22, run_experiment would warm-start it instead
+            raise ValueError("RL experiments can't run yet: `scalelab run` learns to in m2s22")
     except (ValueError, FileNotFoundError) as err:  # pydantic's ValidationError is a ValueError
         raise UsageError(str(err)) from None
 

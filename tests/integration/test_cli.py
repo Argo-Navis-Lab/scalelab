@@ -14,6 +14,7 @@ from scalelab.core.envcapture import EnvInfo
 from scalelab.core.registry import Registry
 
 HELLO = Path(__file__).resolve().parents[2] / "configs" / "experiments" / "hello.yaml"
+RL = HELLO.parent / "rl.yaml"
 
 
 @pytest.fixture
@@ -32,8 +33,8 @@ def test_one_command_records_a_complete_run_row(home, capsys):
 
     registry = Registry.sqlite(home / "registry.db")
     (run,) = registry.list_runs()
-    assert run.run_id.startswith("c6b6e17b3e7b116b-s3-")
-    assert run.config_hash == "c6b6e17b3e7b116b"
+    assert run.run_id.startswith("b38a7209a4d8bd8b-s3-")
+    assert run.config_hash == "b38a7209a4d8bd8b"
     assert run.seed == 3
     assert run.status == "done"
     assert run.deterministic is True  # tests run on CPUs, where it is on by default
@@ -64,7 +65,7 @@ def test_runtime_settings_do_not_change_the_run(home, capsys):
 def test_overrides_make_a_different_experiment(home):
     main(["run", str(HELLO), "model=ladder_s/m2"])
     (run,) = Registry.sqlite(home / "registry.db").list_runs()
-    assert run.config_hash != "c6b6e17b3e7b116b"
+    assert run.config_hash != "b38a7209a4d8bd8b"
 
 
 @pytest.mark.parametrize(
@@ -76,11 +77,21 @@ def test_overrides_make_a_different_experiment(home):
         "seed=-1",
         "runtime.colour=red",
         "task.difficulties=[13]",
+        "task.ops=*+",
+        "algo=grpo",
     ],
 )
 def test_bad_input_is_one_clear_error_and_records_nothing(home, capsys, bad):
     assert main(["run", str(HELLO), bad]) == 2
     assert capsys.readouterr().err.startswith("scalelab: error: ")
+    assert not (home / "registry.db").exists()
+
+
+def test_rl_experiments_are_refused_until_they_can_run(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    assert main(["run", str(RL)]) == 2  # added in m2s18; m2s22 makes them run
+    assert "RL experiments can't run yet" in capsys.readouterr().err
     assert not (home / "registry.db").exists()
 
 

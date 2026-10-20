@@ -50,7 +50,7 @@ def test_written_out_defaults_give_same_hash(raw):
     short = ExperimentConfig.model_validate(raw)
 
     raw["model"]["attn"] = "mha"  # the default, written out
-    raw["optim"] = {"lr": 3e-4, "weight_decay": 0}  # 0, not 0.0: still the same value
+    raw["warm_start"] = {"lr": 1e-3, "grad_clip": 1}  # 1, not 1.0: still the same value
     long = ExperimentConfig.model_validate(raw)
 
     assert config_hash(short) == config_hash(long)
@@ -62,7 +62,7 @@ def test_written_out_defaults_give_same_hash(raw):
         ("model", "n_layers", 5),
         ("model", "attn", "gqa"),
         ("task", "difficulties", [2, 3]),
-        ("optim", "lr", 1e-3),
+        ("task", "ops", "*"),
         ("warm_start", "tokens", 1000),
         ("eval", "every", 10),
     ],
@@ -79,7 +79,7 @@ def test_config_hash_is_16_lowercase_hex(config):
 
 
 def test_infinite_values_cannot_be_hashed(raw):
-    raw["optim"] = {"lr": float("inf")}
+    raw["warm_start"] = {"lr": float("inf")}
     config = ExperimentConfig.model_validate(raw)
     with pytest.raises(ValueError, match="not JSON compliant"):
         config_hash(config)

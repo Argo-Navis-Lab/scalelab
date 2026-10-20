@@ -8,11 +8,11 @@ from scalelab.core.envcapture import EnvInfo, GitInfo, HardwareInfo, SoftwareInf
 
 def test_seed_runtime_and_config_overrides_are_sorted_apart():
     seed, runtime, config = split_overrides(
-        ["seed=2", "runtime.worker_name=colab-1", "model=ladder_s/m2", "optim.lr=1e-3"]
+        ["seed=2", "runtime.worker_name=colab-1", "model=ladder_s/m2", "warm_start.lr=1e-3"]
     )
     assert seed == 2
     assert runtime == {"worker_name": "colab-1"}
-    assert config == ["model=ladder_s/m2", "optim.lr=1e-3"]
+    assert config == ["model=ladder_s/m2", "warm_start.lr=1e-3"]
 
 
 def test_seed_defaults_to_zero():

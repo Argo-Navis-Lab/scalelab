@@ -1,0 +1,11 @@
+# RL after a warm start: GRPO on model m1, from M1's exit warm start of m1. Choose another
+# algorithm with algo=dapo, and so on; another model needs its own warm start (rl.from_run).
+defaults:
+  - model: ladder_s/m1
+  - task: arithmetic
+  - algo: grpo
+
+name: rl
+rl:
+  from_run: c73d1d0f4e234964-s0-2aeaf16b  # M1's exit warm start of m1 (20M tokens, on Drive)
+  flops: 1.0e+15  # about 900 steps of m1, by A's count

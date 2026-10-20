@@ -49,10 +49,16 @@ class ModelConfig(StrictModel):
 # keeps the two in step).
 DIFFICULTIES = {"arithmetic": range(2, 13), "countdown": range(3, 7)}
 
+# What arithmetic can be narrowed to: some of its operations, written in the order "+-*" (the
+# order tasks/arithmetic.py keeps them in), so each choice has one spelling. All three is the
+# default, None.
+ArithmeticOps = Literal["+", "-", "*", "+-", "+*", "-*"]
+
 
 class TaskConfig(StrictModel):
     name: Literal["arithmetic", "countdown"]
     difficulties: tuple[int, ...] = Field(min_length=1)  # each problem's level, drawn evenly
+    ops: ArithmeticOps | None = None  # arithmetic only: None mixes all three operations
 
     @model_validator(mode="after")
     def check_difficulties(self) -> "TaskConfig":
@@ -65,10 +71,11 @@ class TaskConfig(StrictModel):
             )
         return self
 
-
-class OptimConfig(StrictModel):
-    lr: float = Field(default=3e-4, gt=0)
-    weight_decay: float = Field(default=0.0, ge=0)
+    @model_validator(mode="after")
+    def check_ops(self) -> "TaskConfig":
+        if self.ops is not None and self.name != "arithmetic":
+            raise ValueError(f"only arithmetic's operations can be chosen, not {self.name}'s")
+        return self
 
 
 class WarmStartConfig(StrictModel):
@@ -128,15 +135,50 @@ class AlgoConfig(StrictModel):
     overlong_buffer: int = Field(default=16, gt=0)
 
 
+# What a run_id looks like (core/hashing.py makes them): config hash, seed, commit.
+RUN_ID = r"^[0-9a-f]{16}-s[0-9]+-[0-9a-f]{8}$"
+
+
+class RLConfig(StrictModel):
+    """RL after a warm start: the finished run it starts from, the compute it may spend, how
+    each step's answers are made, and how the model is updated from them. (How the loss is
+    worked out is the algo section's job.)"""
+
+    # The run_id of a finished warm start of the same model: RL's first weights, and the
+    # reference its KL penalty measures against.
+    from_run: str = Field(pattern=RUN_ID)
+    flops: float = Field(gt=0)  # the budget: sampling, log-probs and training, counted by A
+    prompts_per_step: int = Field(default=64, gt=0)  # problems drawn each step
+    group_size: int = Field(default=8, ge=2)  # answers to each problem, compared to each other
+    sampling: SamplingParams = Field(default_factory=SamplingParams)
+    epochs: int = Field(default=1, gt=0)  # updates made from each step's answers
+    micro_batch: int = Field(default=64, gt=0)  # answers per backward pass, to fit in memory
+    lr: float = Field(default=1e-5, gt=0)  # constant: no warmup, no decay
+    weight_decay: float = Field(default=0.0, ge=0)
+    grad_clip: float = Field(default=1.0, gt=0)  # the largest gradient norm an update may use
+
+
 class ExperimentConfig(StrictModel):
-    """Everything that defines WHAT the experiment is. This gets hashed."""
+    """Everything that defines WHAT the experiment is. This gets hashed.
+
+    An experiment is a warm start, or RL after one. RL experiments have an algo and an rl
+    section, and warm starts have neither."""
 
     name: str
     model: ModelConfig
     task: TaskConfig
-    optim: OptimConfig = Field(default_factory=OptimConfig)
+    # RL experiments carry this section too, with its defaults, but don't use it: their
+    # weights come from rl.from_run.
     warm_start: WarmStartConfig = Field(default_factory=WarmStartConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
+    algo: AlgoConfig | None = None  # chosen like a model: algo=grpo picks configs/algos/grpo.yaml
+    rl: RLConfig | None = None
+
+    @model_validator(mode="after")
+    def check_rl(self) -> "ExperimentConfig":
+        if (self.algo is None) != (self.rl is None):
+            raise ValueError("an RL experiment needs both an algo and an rl section")
+        return self
 
 
 class RuntimeConfig(StrictModel):
@@ -156,7 +198,7 @@ class RuntimeConfig(StrictModel):
 
 # A `defaults:` entry like `- model: ladder_s/m1` loads configs/models/ladder_s/m1.yaml
 # into the `model` section. These are the groups that can be chosen that way.
-GROUP_FOLDERS = {"model": "models", "task": "tasks"}
+GROUP_FOLDERS = {"model": "models", "task": "tasks", "algo": "algos"}
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -198,18 +240,23 @@ def _set_dotted(data: dict[str, Any], dotted_key: str, value: Any) -> None:
 
 
 def parse_override(text: str) -> tuple[str, Any]:
-    """Split "key=value" and read the value as YAML, so "6" becomes 6 and "true" True."""
+    """Split "key=value" and read the value as YAML, so "6" becomes 6 and "true" True. A
+    value YAML can't read stays text, such as "*" (which YAML takes for the start of an
+    alias)."""
     key, equals, value = text.partition("=")
     if not equals or not key:
         raise ValueError(f"overrides look like key=value, got {text!r}")
-    return key, yaml.safe_load(value)
+    try:
+        return key, yaml.safe_load(value)
+    except yaml.YAMLError:
+        return key, value
 
 
 def compose_config(path: str | Path, overrides: Sequence[str] = ()) -> dict[str, Any]:
     """Build the raw config dict, in order: defaults, then the file itself, then overrides.
 
     An override whose key is a group name picks a different file for that group, as in
-    model=ladder_s/m4. Any other override sets one value, as in optim.lr=1e-3.
+    model=ladder_s/m4. Any other override sets one value, as in warm_start.lr=3e-4.
     """
     path = Path(path)
     raw = _read_yaml(path)

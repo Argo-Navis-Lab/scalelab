@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from scalelab.core.checkpoint import CheckpointPolicy
-from scalelab.core.config import ExperimentConfig, StrictModel
+from scalelab.core.config import ArithmeticOps, ExperimentConfig, StrictModel
 from scalelab.core.determinism import seed_everything
 from scalelab.models.transformer import Transformer
 from scalelab.rl.evaluation import EvalResult, evaluate, evaluate_by
@@ -23,10 +23,13 @@ from scalelab.tasks.evalsets import EVAL_SETS, eval_set_name, read_eval_set
 Report = Callable[[StepMetrics, list[EvalResult]], None]
 
 
-def make_task(name: Literal["arithmetic", "countdown"]) -> tuple[Task[Any], type[StrictModel]]:
-    """The task, and the type of its problems (what its eval set files hold)."""
+def make_task(
+    name: Literal["arithmetic", "countdown"], ops: ArithmeticOps | None = None
+) -> tuple[Task[Any], type[StrictModel]]:
+    """The task, and the type of its problems (what its eval set files hold). `ops` narrows
+    arithmetic to some of its operations; None keeps all three."""
     if name == "arithmetic":
-        return ArithmeticTask(), ArithmeticProblem
+        return ArithmeticTask() if ops is None else ArithmeticTask(ops), ArithmeticProblem
     return CountdownTask(), CountdownProblem
 
 
@@ -81,7 +84,7 @@ def run_experiment(
     seeds = seed_everything(seed, deterministic)  # PyTorch's generator now follows seeds.init
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = Transformer(config.model).to(device)
-    task, problem_type = make_task(config.task.name)
+    task, problem_type = make_task(config.task.name, config.task.ops)
     eval_sets = load_eval_sets(task, problem_type, config.task.difficulties, config.eval.problems)
 
     def grade(metrics: StepMetrics) -> None:

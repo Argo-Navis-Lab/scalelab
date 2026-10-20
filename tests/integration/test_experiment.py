@@ -103,3 +103,14 @@ def test_grading_changes_nothing_about_training(tmp_path: Path):
     config = load_config(HELLO, ["eval.every=5", "eval.problems=5"])
     graded = run_experiment(config, 0, tmp_path / "a", tmp_path, report=lambda m, r: None)
     assert graded == run_experiment(config, 0, tmp_path / "b", tmp_path)  # never graded
+
+
+# --- added in m2s18: the task's operations --------------------------------------------------
+
+
+def test_the_configs_operations_reach_the_training_problems(tmp_path: Path):
+    # A 6-digit multiplication doesn't fit the context (its worked solution is too long), so
+    # this warm start only gets through if it draws additions and subtractions alone.
+    config = load_config(HELLO, ["task.ops=+-", "task.difficulties=[6]", "warm_start.tokens=2000"])
+    metrics = run_experiment(config, 0, tmp_path / "ckpt", tmp_path)
+    assert metrics[-1].tokens >= 2000

@@ -33,8 +33,8 @@ def test_k3_is_0_where_the_policies_agree():
 def test_k3_by_hand():
     # r = 0.25 / 0.5 = 0.5: 0.5 - ln 0.5 - 1 = 0.193. The other way round, r = 2: 0.307.
     half, quarter = torch.tensor([math.log(0.5)]), torch.tensor([math.log(0.25)])
-    assert kl_k3(half, quarter).item() == pytest.approx(0.5 + math.log(2) - 1)
-    assert kl_k3(quarter, half).item() == pytest.approx(2 - math.log(2) - 1)
+    assert kl_k3(half, quarter).item() == pytest.approx(0.5 + math.log(2) - 1, abs=1e-6)
+    assert kl_k3(quarter, half).item() == pytest.approx(2 - math.log(2) - 1, abs=1e-6)
 
 
 def test_k3_is_never_negative():
@@ -96,7 +96,7 @@ def test_clipping_engages_only_outside_the_range_and_only_in_the_advantages_dire
     advantages = torch.tensor([advantage])
     value = clipped_objective(logp.exp(), advantages, CLIP_LOW, CLIP_HIGH)
     value.sum().backward()
-    assert value.item() == pytest.approx(objective)
+    assert value.item() == pytest.approx(objective, abs=1e-6)
     assert clip_engaged(logp.exp(), advantages, CLIP_LOW, CLIP_HIGH).item() == clipped
     assert logp.grad is not None
     assert (logp.grad.item() == 0) == clipped  # a clipped token gets no gradient
@@ -177,7 +177,10 @@ def test_the_kl_term_adds_kl_coef_times_the_normalized_k3():
     ref_logp = torch.log(torch.tensor([[0.5, 1.0, 0.5, 1.0], [1.0, 1.0, 1.0, 1.0]]))
     without = loss_of(torch.zeros(2, 4)).item()
     with_kl = loss_of(torch.zeros(2, 4), kl_coef=0.1, ref_logp=ref_logp).item()
-    assert with_kl - without == pytest.approx(0.1 * 2 * (0.5 + math.log(2) - 1) / 4)
+    # float32 losses near -0.5, subtracted: rounding of ~1e-8 each, which another CPU's exp
+    # and log can double. pytest.approx's default (one part in a million) is too tight.
+    expected = 0.1 * 2 * (0.5 + math.log(2) - 1) / 4
+    assert with_kl - without == pytest.approx(expected, abs=1e-6)
 
 
 def test_a_kl_penalty_needs_the_references_log_probs():

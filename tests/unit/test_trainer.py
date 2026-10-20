@@ -1,17 +1,35 @@
-"""Trainer log-prob tests: one forward pass agrees with what the sampler recorded (at the same
-temperature only), nothing leaks outside the answers, and gradients flow."""
+"""Trainer tests. Log-probs: one forward pass agrees with what the sampler recorded (at the
+same temperature only), nothing leaks outside the answers, and gradients flow. Updates:
+micro-batches add up to the whole batch, clipping and the KL start at 0 and grow, the
+gradient is clipped, and nothing to learn changes nothing."""
+
+import copy
 
 import pytest
 import torch
 
-from scalelab.core.config import ModelConfig, SamplingParams
+from scalelab.core.config import AlgoConfig, ModelConfig, Normalizer, SamplingParams
 from scalelab.models.transformer import Transformer
 from scalelab.rl.rollout import RolloutBatch, generate
-from scalelab.rl.trainer import answer_logprobs
+from scalelab.rl.trainer import answer_logprobs, rl_update
 from scalelab.tasks.tokenizer import encode
 
 SHORT = ModelConfig(name="short", n_layers=2, d_model=64, n_heads=1, context=32)
 PROMPTS = [encode("<bos>12+34="), encode("<bos>123*456="), encode("<bos>56-78=")]  # 7, 9, 7
+# Made-up advantages for the 9 rows that roll() gives: what matters here is the training.
+ADVANTAGES = torch.tensor([1.0, -1.0, 0.5, 0.0, 2.0, -0.5, -1.0, 1.0, 0.0])
+
+
+def algo(normalizer: Normalizer = "seq_mean", kl_coef: float = 0.0) -> AlgoConfig:
+    return AlgoConfig(
+        name="test",
+        estimator="grpo",
+        clip_low=0.2,
+        clip_high=0.2,
+        normalizer=normalizer,
+        normalizer_constant=32,
+        kl_coef=kl_coef,
+    )
 
 
 def make() -> Transformer:
@@ -87,3 +105,117 @@ def test_gradients_reach_the_weights():
     for name, parameter in model.named_parameters():
         assert parameter.grad is not None and torch.all(parameter.grad.isfinite()), name
     assert model.head.weight.grad is not None and model.head.weight.grad.abs().sum() > 0
+
+
+# --- updates --------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("normalizer", ["seq_mean", "token_mean", "constant"])
+def test_micro_batches_add_up_to_the_whole_batch(normalizer: Normalizer):
+    whole, parts = make(), make()
+    batch = roll(whole, 1.0)
+    trained: list[Transformer] = []
+    for model, micro_batch in ((whole, 9), (parts, 2)):  # all 9 rows at once, or 2 at a time
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        rl_update(
+            model,
+            optimizer,
+            batch,
+            ADVANTAGES,
+            batch.response_mask,
+            algo(normalizer),
+            temperature=1.0,
+            micro_batch=micro_batch,
+            grad_clip=1e9,  # no clipping: the gradients themselves must match, size and all
+        )
+        trained.append(model)
+    for a, b in zip(trained[0].parameters(), trained[1].parameters(), strict=True):
+        torch.testing.assert_close(a, b)
+
+
+def test_updates_raise_the_objective_and_clipping_grows_from_0():
+    model = make()
+    batch = roll(model, 1.0)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+    metrics = rl_update(
+        model,
+        optimizer,
+        batch,
+        ADVANTAGES,
+        batch.response_mask,
+        algo(),
+        temperature=1.0,
+        epochs=3,
+    )
+    assert len(metrics) == 3
+    assert metrics[0].clip_fraction == 0  # the first update starts where the batch was drawn
+    assert metrics[2].clip_fraction > 0
+    assert metrics[2].loss < metrics[0].loss  # the loss is minus the objective
+
+
+def test_the_kl_to_the_reference_starts_at_0_and_grows():
+    model = make()
+    reference = copy.deepcopy(model)  # the warm start, frozen
+    batch = roll(model, 1.0)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+    metrics = rl_update(
+        model,
+        optimizer,
+        batch,
+        ADVANTAGES,
+        batch.response_mask,
+        algo(kl_coef=0.04),
+        temperature=1.0,
+        epochs=3,
+        reference=reference,
+    )
+    assert metrics[0].kl < 1e-6
+    assert metrics[2].kl > metrics[0].kl
+
+
+def test_a_kl_penalty_needs_the_reference_model():
+    model = make()
+    batch = roll(model, 1.0)
+    optimizer = torch.optim.AdamW(model.parameters())
+    with pytest.raises(ValueError, match="needs the reference model"):
+        rl_update(
+            model,
+            optimizer,
+            batch,
+            ADVANTAGES,
+            batch.response_mask,
+            algo(kl_coef=0.04),
+            temperature=1.0,
+        )
+
+
+def test_the_gradient_is_clipped():
+    model = make()
+    start = [p.detach().clone() for p in model.parameters()]
+    batch = roll(model, 1.0)
+    optimizer = torch.optim.SGD(model.parameters(), lr=1.0)  # the step is the gradient itself
+    (metrics,) = rl_update(
+        model,
+        optimizer,
+        batch,
+        ADVANTAGES,
+        batch.response_mask,
+        algo(),
+        temperature=1.0,
+        grad_clip=1e-3,
+    )
+    pairs = zip(model.parameters(), start, strict=True)
+    moved = torch.cat([(p.detach() - s).flatten() for p, s in pairs])  # what the step changed
+    assert metrics.grad_norm > 1e-3  # the gradient was bigger than the limit...
+    assert moved.norm().item() == pytest.approx(1e-3, rel=1e-3)  # ...and cut down to it
+
+
+def test_nothing_to_learn_changes_nothing():
+    model = make()
+    start = [p.detach().clone() for p in model.parameters()]
+    batch = roll(model, 1.0)
+    nothing = torch.zeros_like(batch.response_mask)  # every token left out of the loss
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+    assert rl_update(model, optimizer, batch, ADVANTAGES, nothing, algo(), temperature=1.0) == []
+    for p, s in zip(model.parameters(), start, strict=True):
+        assert torch.equal(p, s)

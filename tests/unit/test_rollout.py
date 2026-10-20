@@ -117,3 +117,15 @@ def test_at_a_low_temperature_rollouts_are_greedy(
     batch = generate(model, prompts, 2, params, torch.Generator().manual_seed(0))
     greedy = generate_greedy(model, prompts)
     assert batch.answers() == [answer for answer in greedy for _ in range(2)]
+
+
+def test_rows_slices_a_micro_batch_cut_to_its_own_width():
+    batch = roll()
+    part = batch.rows(3, 6)  # the three answers to PROMPTS[1]
+    width = int(batch.lengths[3:6].max())
+    assert part.tokens.shape == (3, width)
+    assert torch.equal(part.tokens, batch.tokens[3:6, :width])
+    assert torch.equal(part.sampler_logprobs, batch.sampler_logprobs[3:6, :width])
+    assert part.group_ids.tolist() == [1, 1, 1]
+    assert part.finish_reasons == batch.finish_reasons[3:6]
+    assert part.policy_version == batch.policy_version

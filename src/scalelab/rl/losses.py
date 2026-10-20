@@ -72,6 +72,18 @@ def normalize(
     return total.sum() / (mask.shape[0] * constant)
 
 
+def normalizer_size(mask: Tensor, normalizer: Normalizer) -> int:
+    """What `normalize` divides by, leaving out the constant's own number: the answer tokens
+    (token_mean), the answers with tokens left in the loss (seq_mean) or the rows
+    (constant). A micro-batch's loss, weighted by its share of the whole batch's size, adds
+    up to the whole batch's loss."""
+    if normalizer == "token_mean":
+        return int(mask.sum())
+    if normalizer == "seq_mean":
+        return int((mask.sum(dim=1) > 0).sum())
+    return mask.shape[0]
+
+
 def rl_loss(
     logp: Tensor,
     old_logp: Tensor,

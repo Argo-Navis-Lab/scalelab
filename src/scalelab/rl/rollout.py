@@ -40,6 +40,20 @@ class RolloutBatch:
         positions = torch.arange(self.tokens.shape[1])
         return (positions >= self.prompt_lengths[:, None]) & (positions < self.lengths[:, None])
 
+    def rows(self, start: int, stop: int) -> "RolloutBatch":
+        """Rows start to stop (stop not included) on their own, cut to the width their
+        longest row needs: a micro-batch for training."""
+        width = int(self.lengths[start:stop].max())
+        return RolloutBatch(
+            tokens=self.tokens[start:stop, :width],
+            prompt_lengths=self.prompt_lengths[start:stop],
+            lengths=self.lengths[start:stop],
+            finish_reasons=self.finish_reasons[start:stop],
+            sampler_logprobs=self.sampler_logprobs[start:stop, :width],
+            group_ids=self.group_ids[start:stop],
+            policy_version=self.policy_version,
+        )
+
     def answers(self) -> list[list[int]]:
         """Each row's answer tokens, with <eos> at the end when it was written."""
         starts, ends = self.prompt_lengths.tolist(), self.lengths.tolist()

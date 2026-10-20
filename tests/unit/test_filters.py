@@ -1,14 +1,15 @@
-"""Dynamic sampling tests: only groups whose rewards vary are kept, renumbered and narrowed,
-and the advantages of what is kept don't change."""
+"""Filter tests. Dynamic sampling: only groups whose rewards vary are kept, renumbered and
+narrowed, and the advantages of what is kept don't change. Overlong handling: unfinished
+answers left out of the loss, and the soft penalty by hand."""
 
 import pytest
 import torch
 
-from scalelab.core.config import Estimator
+from scalelab.core.config import Estimator, Overlong
 from scalelab.rl.advantages import advantages
-from scalelab.rl.filters import drop_flat_groups, varied_groups
+from scalelab.rl.filters import drop_flat_groups, loss_mask, overlong_penalty, varied_groups
 from scalelab.rl.rollout import RolloutBatch
-from scalelab.tasks.tokenizer import PAD, encode
+from scalelab.tasks.tokenizer import EOS, PAD, encode
 
 # Three groups of two answers: both right (written out in full, the batch's longest rows), one
 # right and one wrong, both wrong. Only the middle group has something to teach.
@@ -18,6 +19,9 @@ GROUPS = [
     ("<bos>56-78=", ["#1<eos>", "#2<eos>"]),
 ]
 REWARDS = torch.tensor([1.0, 1, 1, 0, 0, 0])
+# Four answers of 21, 22, 23 and 25 tokens to a 7-token prompt, in a context of 32: room for
+# 25. The last ran out of context before writing <eos>.
+LONG = [("<bos>12+34=", ["1" * 20 + "<eos>", "1" * 21 + "<eos>", "1" * 22 + "<eos>", "1" * 25])]
 
 
 def batch_of(groups: list[tuple[str, list[str]]]) -> RolloutBatch:
@@ -38,7 +42,7 @@ def batch_of(groups: list[tuple[str, list[str]]]) -> RolloutBatch:
         tokens=tokens,
         prompt_lengths=torch.tensor([len(prompt) for _, prompt, _ in rows]),
         lengths=torch.tensor(lengths),
-        finish_reasons=["eos"] * len(rows),
+        finish_reasons=["eos" if answer[-1] == EOS else "length" for _, _, answer in rows],
         sampler_logprobs=sampler_logprobs,
         group_ids=torch.tensor([group for group, _, _ in rows]),
         policy_version=7,
@@ -85,3 +89,25 @@ def test_when_no_group_varies_nothing_is_left():
     assert kept.tokens.shape == (0, 0)
     assert kept.finish_reasons == []
     assert rewards.tolist() == []
+
+
+# --- overlong handling ----------------------------------------------------------------------
+
+
+def test_the_soft_penalty_by_hand():
+    # With a zone of 4 tokens: none at 21 (4 short of the room of 25), then -1/4 a token.
+    penalty = overlong_penalty(batch_of(LONG), context=32, buffer=4)
+    assert penalty.tolist() == [0.0, -0.25, -0.5, -1.0]
+
+
+def test_truncate_mask_leaves_out_the_answers_that_ran_out_of_context():
+    batch = batch_of(LONG)
+    mask = loss_mask(batch, "truncate_mask")
+    assert torch.equal(mask[:3], batch.response_mask[:3])  # the three that wrote <eos>
+    assert not mask[3].any()  # the one that didn't: none of its tokens
+
+
+@pytest.mark.parametrize("overlong", ["none", "soft_penalty"])
+def test_the_other_settings_keep_every_answer_in_the_loss(overlong: Overlong):
+    batch = batch_of(LONG)
+    assert torch.equal(loss_mask(batch, overlong), batch.response_mask)

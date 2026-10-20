@@ -8,3 +8,5 @@ normalizer: token_mean
 kl_coef: 0.0
 dynamic_sampling: true
 overlong: soft_penalty
+# The penalty starts 16 tokens before the context's end: right answers stop 18 short of it.
+overlong_buffer: 16

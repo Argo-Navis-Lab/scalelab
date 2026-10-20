@@ -13,6 +13,9 @@ from pydantic import ValidationError
 from scalelab.core.config import AlgoConfig, Estimator, Normalizer
 from scalelab.rl.advantages import advantages
 from scalelab.rl.losses import normalize
+from scalelab.tasks.arithmetic import ArithmeticProblem, ArithmeticTask
+from scalelab.tasks.evalsets import read_eval_set
+from scalelab.tasks.tokenizer import encode
 
 ALGOS = Path(__file__).resolve().parents[2] / "configs" / "algos"
 
@@ -61,6 +64,17 @@ def test_every_preset_file_is_in_the_table():
     assert sorted(path.stem for path in ALGOS.glob("*.yaml")) == sorted(TABLE)
 
 
+def test_dapos_penalty_zone_starts_after_every_right_arithmetic_answer():
+    # A right answer must never be penalized for its length: its worked solution and <eos>
+    # stop short of the zone (at most 225 tokens, for 5-digit "*", with room for 243).
+    buffer, task = preset("dapo").overlong_buffer, ArithmeticTask()
+    for band in (2, 3, 4, 5):
+        for problem in read_eval_set(f"arithmetic-{band}", ArithmeticProblem):
+            room = 256 - len(task.format_prompt(problem))  # the longest the answer could be
+            answer = len(encode(task.worked_solution(problem))) + 1  # and its <eos>
+            assert answer <= room - buffer, problem.question
+
+
 # --- the settings ---------------------------------------------------------------------------
 
 
@@ -72,7 +86,7 @@ def test_knobs_left_out_take_quiet_defaults():
         False,
         "none",
     )
-    assert algo.normalizer_constant == 256
+    assert (algo.normalizer_constant, algo.overlong_buffer) == (256, 16)
 
 
 @pytest.mark.parametrize(
@@ -83,6 +97,7 @@ def test_knobs_left_out_take_quiet_defaults():
         {"kl_coef": -0.04},
         {"format_weight": -1.0},
         {"normalizer_constant": 0},
+        {"overlong_buffer": 0},
         {"estimator": "ppo"},
         {"normalizer": "mean"},
         {"overlong": "cut"},
@@ -94,6 +109,7 @@ def test_knobs_left_out_take_quiet_defaults():
         "negative-kl",
         "negative-format",
         "zero-constant",
+        "zero-buffer",
         "unknown-estimator",
         "unknown-normalizer",
         "unknown-overlong",

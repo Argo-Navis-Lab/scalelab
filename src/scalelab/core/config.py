@@ -124,6 +124,8 @@ class AlgoConfig(StrictModel):
     format_weight: float = Field(default=0.0, ge=0)  # the weight of the reward's format part
     dynamic_sampling: bool = False  # drop groups whose rewards are all equal
     overlong: Overlong = "none"  # what happens to answers that run too long
+    # The soft penalty's zone: the last this many tokens before an answer fills the context.
+    overlong_buffer: int = Field(default=16, gt=0)
 
 
 class ExperimentConfig(StrictModel):

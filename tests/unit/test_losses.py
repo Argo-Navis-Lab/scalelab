@@ -197,3 +197,28 @@ def test_nothing_outside_the_answers_reaches_the_loss():
     wild = torch.where(MASK, 0.0, 123.0)  # e^123 is inf in float32: ratios of inf out there
     knobs: dict[str, Any] = {"kl_coef": 0.04, "ref_logp": torch.zeros(2, 4)}
     assert loss_of(wild, **knobs).item() == loss_of(torch.zeros(2, 4), **knobs).item()
+
+
+def test_seq_mean_leaves_out_a_row_with_no_tokens_in_the_loss():
+    mask = torch.tensor([[True, True, True, False], [False, False, False, False]])
+    per_token = torch.tensor([[1.0, 2, 3, 99], [99, 99, 99, 99]])
+    assert normalize(per_token, mask, "seq_mean").item() == 2.0  # row 0's average alone
+
+
+@pytest.mark.parametrize("normalizer", ["seq_mean", "token_mean", "constant"])
+def test_with_nothing_left_in_the_loss_it_is_0_with_0_gradients(normalizer: Normalizer):
+    logp = torch.zeros(2, 4, requires_grad=True)
+    nothing = torch.zeros(2, 4, dtype=torch.bool)  # every answer left out of the loss
+    loss = rl_loss(
+        logp,
+        torch.zeros(2, 4),
+        torch.tensor([1.0, -1.0]),
+        nothing,
+        clip_low=0.2,
+        clip_high=0.2,
+        normalizer=normalizer,
+        constant=4,
+    )
+    loss.backward()
+    assert loss.item() == 0.0
+    assert logp.grad is not None and torch.all(logp.grad == 0)

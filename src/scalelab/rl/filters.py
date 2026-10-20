@@ -1,7 +1,9 @@
 """Filters between scoring and training: which rollouts are worth a training pass."""
 
+import torch
 from torch import Tensor
 
+from scalelab.core.config import Overlong
 from scalelab.rl.advantages import group_size
 from scalelab.rl.rollout import RolloutBatch
 
@@ -40,3 +42,23 @@ def drop_flat_groups(batch: RolloutBatch, rewards: Tensor) -> tuple[RolloutBatch
     """
     varied = varied_groups(rewards, batch.group_ids)
     return keep_groups(batch, varied), rewards[varied[batch.group_ids]]
+
+
+def loss_mask(batch: RolloutBatch, overlong: Overlong) -> Tensor:
+    """(rows, width) the tokens the loss counts: every answer's, except that "truncate_mask"
+    (DAPO's overlong filtering) leaves out the answers that ran out of context before writing
+    <eos>. An unfinished answer's reward says little about the tokens it wrote."""
+    if overlong != "truncate_mask":
+        return batch.response_mask
+    finished = torch.tensor([reason == "eos" for reason in batch.finish_reasons])
+    return batch.response_mask & finished[:, None]
+
+
+def overlong_penalty(batch: RolloutBatch, context: int, buffer: int) -> Tensor:
+    """(rows,) DAPO's soft overlong penalty, added to each row's reward: 0 while an answer
+    stays at least `buffer` tokens short of the longest it could be (the context minus its
+    prompt), then falling in a straight line to -1 at that limit."""
+    room = context - batch.prompt_lengths  # the longest each answer could be
+    written = batch.lengths - batch.prompt_lengths
+    into_zone = (written - (room - buffer)).clamp(min=0)
+    return -into_zone.float() / buffer

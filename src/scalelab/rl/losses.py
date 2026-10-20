@@ -59,8 +59,12 @@ def normalize(
                 longest answer allowed): no division by any answer's own length
     """
     total = torch.where(mask, per_token, 0.0)
+    if not mask.any():
+        return total.sum()  # nothing left to learn from: a loss of 0, with gradients of 0
     if normalizer == "seq_mean":
-        return (total.sum(dim=1) / mask.sum(dim=1)).mean()
+        counts = mask.sum(dim=1)
+        counted = counts > 0  # a row with no tokens left in the loss isn't in the average
+        return (total.sum(dim=1)[counted] / counts[counted]).mean()
     if normalizer == "token_mean":
         return total.sum() / mask.sum()
     if constant is None:

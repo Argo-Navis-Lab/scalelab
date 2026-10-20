@@ -55,6 +55,13 @@ class OptimizerStepEvent:
     grad_norm: float  # the gradient's size before clipping
 
 
+@dataclass(frozen=True)
+class CheckpointEvent:
+    """A checkpoint has been saved: the run would resume from here if it died now."""
+
+    step: int
+
+
 class Hook:
     """Something that watches training. Each method is one hook point and does nothing here:
     a collector overrides the ones it needs.
@@ -75,3 +82,6 @@ class Hook:
 
     def on_optimizer_step(self, event: OptimizerStepEvent) -> None:
         """An update has changed the weights."""
+
+    def on_checkpoint(self, event: CheckpointEvent) -> None:
+        """A checkpoint has been saved."""

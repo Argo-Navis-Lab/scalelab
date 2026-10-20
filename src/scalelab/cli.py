@@ -14,19 +14,28 @@ import torch
 
 from scalelab.core import hashing
 from scalelab.core.checkpoint import CheckpointPolicy
-from scalelab.core.config import RuntimeConfig, load_config, parse_override
+from scalelab.core.config import ModelConfig, RuntimeConfig, load_config, parse_override
 from scalelab.core.determinism import MAX_SEED, default_deterministic
 from scalelab.core.envcapture import EnvInfo, capture_env
 from scalelab.core.registry import EvalRecord, OutdatedRegistryError, Registry
 from scalelab.core.storage import atomic_write_bytes, registry_path, scalelab_home
-from scalelab.rl.evaluation import EvalResult
-from scalelab.rl.experiment import grade_by_part, load_eval_sets, make_task, run_experiment
+from scalelab.models.transformer import Transformer
+from scalelab.rl.evaluation import EvalResult, SampledResult
+from scalelab.rl.experiment import (
+    grade_by_part,
+    load_eval_sets,
+    make_task,
+    run_experiment,
+    run_rl_experiment,
+)
 from scalelab.rl.finished import load_finished_run
+from scalelab.rl.loop import RLStepMetrics
 from scalelab.rl.warmstart_loop import StepMetrics
 
 EXIT_USAGE = 2  # the command line asked for something impossible
 EXIT_INTERRUPTED = 130  # stopped early with a checkpoint saved; run again to resume
-METRIC = "greedy_pass@1"  # the only metric so far; sampled pass@k arrives with m2's sampling
+METRIC = "greedy_pass@1"  # the greedy grade's name in the evals table
+SAMPLED_KS = (1, 4)  # RL's sampled grades: pass@1, and pass@4 (how often 4 tries find it)
 
 
 class UsageError(Exception):
@@ -68,6 +77,68 @@ def speed(tokens: int, seconds: float, done: int, budget: int) -> str:
     return f"{per_second:,.0f} tokens/s, about {duration(left)} to go"
 
 
+def flops_speed(flops: float, seconds: float, done: float, budget: float) -> str:
+    """The same for RL, whose budget is in FLOPs: how fast `flops` went by in `seconds`, and
+    how long the rest of the budget will take at that speed, with `done` of it spent."""
+    per_second = flops / seconds
+    left = max(0.0, budget - done) / per_second
+    return f"{per_second:.2e} FLOPs/s, about {duration(left)} to go"
+
+
+def eval_records(
+    run_id: str,
+    step: int,
+    greedy: Sequence[EvalResult],
+    sampled: Sequence[SampledResult] = (),
+) -> list[EvalRecord]:
+    """One grading's rows for the evals table: greedy pass@1 for each greedy result, then
+    sampled pass@1 and pass@4 for each sampled one."""
+    records = [
+        EvalRecord(
+            run_id=run_id,
+            step=step,
+            task=result.name,
+            metric=METRIC,
+            value=result.pass_rate,
+            n=result.n,
+            stderr=result.stderr,
+        )
+        for result in greedy
+    ]
+    for result in sampled:
+        for k in SAMPLED_KS:
+            records.append(
+                EvalRecord(
+                    run_id=run_id,
+                    step=step,
+                    task=result.name,
+                    metric=f"sampled_pass@{k}",
+                    value=result.pass_at(k),
+                    n=result.n,
+                    stderr=result.stderr(k),
+                )
+            )
+    return records
+
+
+def load_warm_start(
+    from_run: str, model: ModelConfig, registry: Registry, home: Path
+) -> Transformer:
+    """The model an RL experiment starts from: run `from_run`'s last checkpoint. Refused with
+    a UsageError, before anything is recorded, unless that run is finished in `registry` and
+    trained the same model as the experiment's."""
+    try:
+        finished = load_finished_run(registry, home, from_run)
+    except ValueError as err:
+        raise UsageError(f"rl.from_run: {err}") from None
+    if finished.model.config != model:
+        raise UsageError(
+            f"rl.from_run {from_run} trained model {finished.model.config.name}, "
+            f"not this experiment's model {model.name}"
+        )
+    return finished.model
+
+
 def same_uncommitted_changes(recorded_env_json: str, env: EnvInfo) -> bool:
     """Was the run recorded with exactly the uncommitted changes we have now (or none)?"""
     recorded = EnvInfo.model_validate_json(recorded_env_json)
@@ -80,8 +151,6 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
         seed, runtime_values, config_overrides = split_overrides(overrides)
         config = load_config(experiment, config_overrides)
         runtime = RuntimeConfig.model_validate(runtime_values)
-        if config.rl is not None:  # until m2s22, run_experiment would warm-start it instead
-            raise ValueError("RL experiments can't run yet: `scalelab run` learns to in m2s22")
     except (ValueError, FileNotFoundError) as err:  # pydantic's ValidationError is a ValueError
         raise UsageError(str(err)) from None
 
@@ -127,27 +196,22 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
     if existing is not None and existing.status == "done":
         print("already done: nothing to do")
         return 0
+    start = None  # RL's starting model, checked before anything is recorded
+    if config.rl is not None:
+        start = load_warm_start(config.rl.from_run, config.model, registry, home)
+        print(f"warm start:    {config.rl.from_run}")
 
-    # Speed is measured between gradings, from the time and token count at the last one. A
-    # resumed run's starting token count isn't known here, so its first grading shows none.
+    # Speed is measured between gradings, from the time and the token (or FLOP) count at the
+    # last one. A resumed run's count isn't known here, so its first grading shows none.
     last_tokens = 0 if existing is None else None
+    last_flops = 0 if existing is None else None
 
     def report(metrics: StepMetrics, results: list[EvalResult]) -> None:
         """Record each eval result in the registry, and print one line of progress: the
         grades, and the speed since the last grading, with the time it gives to the end."""
         nonlocal last_time, last_tokens
-        for result in results:
-            registry.record_eval(
-                EvalRecord(
-                    run_id=run_id,
-                    step=metrics.step,
-                    task=result.name,
-                    metric=METRIC,
-                    value=result.pass_rate,
-                    n=result.n,
-                    stderr=result.stderr,
-                )
-            )
+        for record in eval_records(run_id, metrics.step, results):
+            registry.record_eval(record)
         copy_home()
         rates = "  ".join(f"{result.name} {result.pass_rate:.1%}" for result in results)
         now, pace = time.monotonic(), ""
@@ -156,6 +220,32 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
             pace = f"  ({speed(read, now - last_time, metrics.tokens, config.warm_start.tokens)})"
         last_time, last_tokens = now, metrics.tokens
         print(f"step {metrics.step:,}: loss {metrics.loss:.3f}  {rates}{pace}")
+
+    def rl_report(
+        metrics: RLStepMetrics | None, greedy: list[EvalResult], sampled: list[SampledResult]
+    ) -> None:
+        """The same for RL: record the grading (greedy and sampled, whole and by part), and
+        print the whole eval sets' greedy and sampled pass@1. metrics is None at step 0."""
+        nonlocal last_time, last_flops
+        for record in eval_records(run_id, 0 if metrics is None else metrics.step, greedy, sampled):
+            registry.record_eval(record)
+        copy_home()
+        by_name = {result.name: result for result in sampled}
+        rates = "  ".join(
+            f"{result.name} {result.pass_rate:.1%} (sampled {by_name[result.name].pass_at(1):.1%})"
+            for result in greedy
+            if "/" not in result.name  # whole sets only: the parts are in the registry
+        )
+        now, pace = time.monotonic(), ""
+        if metrics is None:
+            print(f"step 0 (the warm start): {rates}")
+        else:
+            if last_flops is not None and now > last_time and config.rl is not None:
+                done = metrics.flops - last_flops  # FLOPs spent since the last grading
+                pace = f"  ({flops_speed(done, now - last_time, metrics.flops, config.rl.flops)})"
+            last_flops = metrics.flops
+            print(f"step {metrics.step:,}: reward {metrics.reward:.3f}  {rates}{pace}")
+        last_time = now
 
     policy = CheckpointPolicy()
     previous_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
@@ -170,15 +260,15 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
         copy_home()
         started = last_time = time.monotonic()  # the clock starts with training
         try:
-            metrics = run_experiment(
-                config,
-                seed,
-                home / "checkpoints" / run_id,
-                home=home,
-                policy=policy,
-                deterministic=deterministic,
-                report=report,
-            )
+            checkpoints = home / "checkpoints" / run_id
+            if start is None:
+                metrics = run_experiment(
+                    config, seed, checkpoints, home, policy, deterministic, report=report
+                )
+            else:
+                metrics = run_rl_experiment(
+                    config, seed, start, checkpoints, home, policy, deterministic, rl_report
+                )
         except Exception:
             registry.finish_run(run_id, "failed")
             raise
@@ -196,11 +286,17 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
     if not metrics:
         print("done: the last checkpoint was already saved, so there was nothing left to train")
         return 0
-    last = metrics[-1]
-    print(
-        f"done: ran {len(metrics)} steps in {duration(time.monotonic() - started)} "
-        f"({last.tokens:,} tokens and {last.flops:.2e} FLOPs in all), last loss {last.loss!r}"
-    )
+    last, took = metrics[-1], duration(time.monotonic() - started)
+    if isinstance(last, RLStepMetrics):
+        print(
+            f"done: ran {len(metrics)} steps in {took} ({last.flops:.2e} FLOPs in all), "
+            f"last reward {last.reward:.3f}"
+        )
+    else:
+        print(
+            f"done: ran {len(metrics)} steps in {took} "
+            f"({last.tokens:,} tokens and {last.flops:.2e} FLOPs in all), last loss {last.loss!r}"
+        )
     return 0
 
 

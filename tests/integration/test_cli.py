@@ -87,14 +87,6 @@ def test_bad_input_is_one_clear_error_and_records_nothing(home, capsys, bad):
     assert not (home / "registry.db").exists()
 
 
-def test_rl_experiments_are_refused_until_they_can_run(
-    home: Path, capsys: pytest.CaptureFixture[str]
-):
-    assert main(["run", str(RL)]) == 2  # added in m2s18; m2s22 makes them run
-    assert "RL experiments can't run yet" in capsys.readouterr().err
-    assert not (home / "registry.db").exists()
-
-
 def test_old_registry_file_is_reported_clearly(home, capsys):
     registry = Registry.sqlite(home / "registry.db")
     with registry.engine.begin() as conn:
@@ -176,3 +168,68 @@ def test_each_grading_reports_the_speed_and_the_time_left(
     assert all(speed.search(line) for line in gradings), gradings
     assert gradings[-1].endswith("about 0 s to go)")  # the budget is spent
     assert re.search(r"done: ran 16 steps in \d+ s \(", output)
+
+
+# --- added in m2s22: RL runs ----------------------------------------------------------------
+
+# hello and rl.yaml made small enough for a test: 2-digit problems only, a 64-token context, 4
+# problems x 2 answers an RL step, a budget of about 2 steps, graded at every step on the
+# first 5 problems of arithmetic-2.
+SMALL = ["model.context=64", "task.difficulties=[2]"]
+SMALL_RL = [
+    *SMALL,
+    "rl.prompts_per_step=4",
+    "rl.group_size=2",
+    "rl.flops=1e10",
+    "eval.every=1",
+    "eval.problems=5",
+]
+
+
+def warm_started(home: Path) -> str:
+    """Run hello, made small, and return its run_id: a finished warm start to begin RL from."""
+    assert main(["run", str(HELLO), *SMALL]) == 0
+    (run,) = Registry.sqlite(home / "registry.db").list_runs()
+    return run.run_id
+
+
+def test_an_rl_run_starts_from_a_warm_start_and_records_every_grading(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    warm_start = warm_started(home)
+    assert main(["run", str(RL), *SMALL_RL, f"rl.from_run={warm_start}"]) == 0
+    output = capsys.readouterr().out
+    assert f"warm start:    {warm_start}" in output
+    assert "step 0 (the warm start): arithmetic-2 " in output
+    registry = Registry.sqlite(home / "registry.db")
+    (rl,) = [run for run in registry.list_runs() if run.run_id != warm_start]
+    assert rl.status == "done"
+    steps = int(re.findall(r"done: ran (\d+) steps", output)[-1])
+    graded = registry.list_evals(rl.run_id)
+    assert sorted({e.step for e in graded}) == list(range(steps + 1))  # step 0, then every step
+    metrics = {"greedy_pass@1", "sampled_pass@1", "sampled_pass@4"}
+    for step in range(steps + 1):
+        at_step = [e for e in graded if e.step == step and e.task == "arithmetic-2"]
+        assert {e.metric for e in at_step} == metrics
+        assert all(e.n == 5 for e in at_step)
+
+
+def test_rl_from_a_run_the_registry_lacks_is_refused(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    missing = "rl.from_run=0123456789abcdef-s0-01234567"
+    assert main(["run", str(RL), *SMALL_RL, missing]) == 2
+    error = "rl.from_run: the registry has no run 0123456789abcdef-s0-01234567"
+    assert error in capsys.readouterr().err
+    assert Registry.sqlite(home / "registry.db").list_runs() == []  # nothing recorded
+
+
+def test_rl_from_a_warm_start_of_another_model_is_refused(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    warm_start = warm_started(home)
+    other = ["model=ladder_s/m2", f"rl.from_run={warm_start}"]
+    assert main(["run", str(RL), *SMALL_RL, *other]) == 2
+    error = f"rl.from_run {warm_start} trained model m1, not this experiment's model m2"
+    assert error in capsys.readouterr().err
+    assert len(Registry.sqlite(home / "registry.db").list_runs()) == 1  # only the warm start

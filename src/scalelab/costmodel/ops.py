@@ -21,6 +21,18 @@ class FlopCounts(StrictModel):
     def total(self) -> int:
         return self.dense + self.attention
 
+    def __add__(self, other: "FlopCounts") -> "FlopCounts":
+        """Two counts together, part by part, so `a + b` and sum(...) work."""
+        return FlopCounts(
+            projections=self.projections + other.projections,
+            attention=self.attention + other.attention,
+            mlp=self.mlp + other.mlp,
+            logits=self.logits + other.logits,
+        )
+
+
+NO_FLOPS = FlopCounts(projections=0, attention=0, mlp=0, logits=0)  # where sums start
+
 
 def count_flops(model: ModelSpec, workload: WorkloadSpec) -> FlopCounts:
     """The exact FLOPs of a workload: one forward pass, or forward and backward to train."""

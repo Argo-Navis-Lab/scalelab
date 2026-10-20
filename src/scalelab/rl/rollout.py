@@ -80,18 +80,13 @@ def generate(
     """
     # groups[r]: the prompt that row r answers. n rows per prompt, in the prompts' order.
     groups = [index for index in range(len(prompts)) for _ in range(n_per_prompt)]
-    same_length: dict[int, list[int]] = defaultdict(list)  # prompt length -> those rows
-    for row, index in enumerate(groups):
-        same_length[len(prompts[index])].append(row)
     answers: list[list[int]] = [[] for _ in groups]
     logprobs: list[list[float]] = [[] for _ in groups]
-    for rows in same_length.values():
-        for first in range(0, len(rows), batch_size):
-            chunk = rows[first : first + batch_size]
-            chunk_prompts = [prompts[groups[row]] for row in chunk]
-            written = _sample_batch(model, chunk_prompts, params, generator)
-            for row, (answer, values) in zip(chunk, written, strict=True):
-                answers[row], logprobs[row] = answer, values  # back to the row's own place
+    for chunk in decode_chunks([len(prompts[index]) for index in groups], batch_size):
+        chunk_prompts = [prompts[groups[row]] for row in chunk]
+        written = _sample_batch(model, chunk_prompts, params, generator)
+        for row, (answer, values) in zip(chunk, written, strict=True):
+            answers[row], logprobs[row] = answer, values  # back to the row's own place
 
     prompt_lengths = [len(prompts[index]) for index in groups]
     lengths = [start + len(answer) for start, answer in zip(prompt_lengths, answers, strict=True)]
@@ -110,6 +105,20 @@ def generate(
         group_ids=torch.tensor(groups),
         policy_version=policy_version,
     )
+
+
+def decode_chunks(prompt_lengths: Sequence[int], batch_size: int) -> list[list[int]]:
+    """Which rows generate() decodes together: rows whose prompts have the same length (in
+    the order those lengths first appear), at most batch_size at a time. The cost model
+    reads the same plan, so it counts the work generate() really did."""
+    same_length: dict[int, list[int]] = defaultdict(list)  # prompt length -> those rows
+    for row, length in enumerate(prompt_lengths):
+        same_length[length].append(row)
+    return [
+        rows[first : first + batch_size]
+        for rows in same_length.values()
+        for first in range(0, len(rows), batch_size)
+    ]
 
 
 def _sample_batch(

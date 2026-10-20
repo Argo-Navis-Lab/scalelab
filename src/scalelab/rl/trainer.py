@@ -1,6 +1,8 @@
 """The trainer's side of RL: what the model being trained makes of the sampled answers, and
 the updates that train it on them."""
 
+from collections.abc import Sequence
+
 import torch
 from torch import Tensor
 
@@ -9,6 +11,7 @@ from scalelab.models.transformer import Transformer
 from scalelab.rl.losses import clip_engaged, kl_k3, normalizer_size, rl_loss
 from scalelab.rl.rollout import RolloutBatch
 from scalelab.rl.sampling import log_probs
+from scalelab.telemetry.hooks import BackwardEvent, ForwardEvent, Hook, OptimizerStepEvent
 
 
 def answer_logprobs(model: Transformer, batch: RolloutBatch, temperature: float) -> Tensor:
@@ -51,6 +54,8 @@ def rl_update(
     micro_batch: int = 64,
     grad_clip: float = 1.0,
     reference: Transformer | None = None,
+    hooks: Sequence[Hook] = (),
+    step: int = 0,
 ) -> list[UpdateMetrics]:
     """Train `model` on a scored batch: `epochs` updates, each a pass over all its rows in
     micro-batches of `micro_batch` rows (their gradients add up), then one optimizer step
@@ -60,6 +65,10 @@ def rl_update(
     the reference's too when algo.kl_coef > 0. `mask` (rows, width) marks the tokens the
     loss counts (see filters.loss_mask). With nothing to count, nothing changes and the
     result is [].
+
+    Each of `hooks` is called after every micro-batch's loss (on_forward), once an update's
+    gradients are complete (on_backward) and after each optimizer step (on_optimizer_step),
+    told `step`: the RL step this is.
     """
     if algo.kl_coef > 0 and reference is None:
         raise ValueError("a KL penalty (kl_coef > 0) needs the reference model")
@@ -76,7 +85,7 @@ def rl_update(
 
     rows, tokens = len(batch.finish_reasons), int(mask.sum())
     metrics: list[UpdateMetrics] = []
-    for _ in range(epochs):
+    for epoch in range(epochs):
         optimizer.zero_grad()
         loss_sum, clipped, kl_sum = 0.0, 0, 0.0
         for start in range(0, rows, micro_batch):
@@ -99,6 +108,19 @@ def rl_update(
                 kl_coef=algo.kl_coef,
                 ref_logp=part_ref,
             )
+            forward = ForwardEvent(
+                step=step,
+                epoch=epoch,
+                batch=part,
+                logp=logp.detach(),  # hooks see the numbers, not the graph behind them
+                old_logp=part_old,
+                ref_logp=part_ref,
+                advantages=part_adv,
+                mask=part_mask,
+                loss=loss.detach(),
+            )
+            for hook in hooks:
+                hook.on_forward(forward)
             share = normalizer_size(part_mask, algo.normalizer) / total
             (loss * share).backward()  # the micro-batches' gradients add up to the batch's
             with torch.no_grad():
@@ -108,8 +130,16 @@ def rl_update(
                 clipped += int((engaged & part_mask).sum())
                 if part_ref is not None:
                     kl_sum += float(kl_k3(logp, part_ref)[part_mask].sum())
+        backward = BackwardEvent(step=step, epoch=epoch, model=model)
+        for hook in hooks:
+            hook.on_backward(backward)
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
+        stepped = OptimizerStepEvent(
+            step=step, epoch=epoch, model=model, optimizer=optimizer, grad_norm=grad_norm.item()
+        )
+        for hook in hooks:
+            hook.on_optimizer_step(stepped)
         metrics.append(
             UpdateMetrics(
                 loss=loss_sum,

@@ -16,7 +16,7 @@ from scalelab.core.checkpoint import (
     restore_rng,
     save_checkpoint,
 )
-from scalelab.core.config import StrictModel, WarmStartConfig
+from scalelab.core.config import RLConfig, StrictModel, WarmStartConfig
 from scalelab.costmodel.ops import count_flops
 from scalelab.costmodel.specs import ModelSpec, WorkloadSpec
 from scalelab.models.transformer import Transformer
@@ -46,9 +46,9 @@ def learning_rate(config: WarmStartConfig, progress: float) -> float:
     return config.lr * (config.decay_to + (1 - config.decay_to) * cosine)
 
 
-def make_optimizer(model: Transformer, config: WarmStartConfig) -> torch.optim.AdamW:
-    """AdamW. Weight decay pulls the matrices toward zero; the norms' weights, which are
-    vectors, are left alone (GPT-2's recipe)."""
+def make_optimizer(model: Transformer, config: WarmStartConfig | RLConfig) -> torch.optim.AdamW:
+    """AdamW, for warm starts and RL alike. Weight decay pulls the matrices toward zero; the
+    norms' weights, which are vectors, are left alone (GPT-2's recipe)."""
     matrices = [p for p in model.parameters() if p.dim() >= 2]
     vectors = [p for p in model.parameters() if p.dim() < 2]
     groups = [

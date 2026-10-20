@@ -1,16 +1,28 @@
 """Loss tests: the k3 KL estimator (against hand-worked values, float32 rounding and the exact
-KL it estimates) and the clipped objective (where clipping engages, and where it doesn't)."""
+KL it estimates), the clipped objective (where clipping engages, and where it doesn't), the
+three normalizers by hand, and the whole loss."""
 
 import math
+from typing import Any
 
 import pytest
 import torch
+from torch import Tensor
 
-from scalelab.rl.losses import clip_engaged, clipped_objective, kl_k3
+from scalelab.rl.losses import (
+    Normalizer,
+    clip_engaged,
+    clipped_objective,
+    kl_k3,
+    normalize,
+    rl_loss,
+)
 
 P = torch.tensor([0.5, 0.3, 0.2])  # the policy's probabilities for three tokens
 Q = torch.tensor([0.2, 0.3, 0.5])  # the reference's
 CLIP_LOW, CLIP_HIGH = 0.2, 0.28  # the DAPO-style range: [0.8, 1.28]
+# Two answers side by side: one of 3 tokens, one of 1, then padding.
+MASK = torch.tensor([[True, True, True, False], [True, False, False, False]])
 
 
 def test_k3_is_0_where_the_policies_agree():
@@ -98,3 +110,87 @@ def test_before_any_update_the_gradient_is_each_rows_advantage():
     clipped_objective(logp.exp(), advantages, CLIP_LOW, CLIP_HIGH).sum().backward()
     assert logp.grad is not None
     assert torch.equal(logp.grad, advantages[:, None].expand(3, 4))
+
+
+# --- normalizers and the whole loss ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("normalizer", "expected"),
+    [
+        ("seq_mean", 3.0),  # (6 / 3 + 4 / 1) / 2: every answer counts the same
+        ("token_mean", 2.5),  # 10 / 4: every token counts the same
+        ("constant", 1.25),  # 10 / (2 rows * 4)
+    ],
+)
+def test_each_normalizer_by_hand(normalizer: Normalizer, expected: float):
+    per_token = torch.tensor([[1.0, 2, 3, 99], [4, 99, 99, 99]])  # 99s: not in an answer
+    assert normalize(per_token, MASK, normalizer, constant=4).item() == expected
+
+
+def test_the_constant_normalizer_needs_its_constant():
+    with pytest.raises(ValueError, match="needs `constant`"):
+        normalize(torch.ones(2, 4), MASK, "constant")
+
+
+def loss_of(logp: Tensor, normalizer: Normalizer = "token_mean", **knobs: Any) -> Tensor:
+    """rl_loss for MASK's two answers: a right one (A = 1, 3 tokens) and a wrong one (A = -1,
+    1 token), with old log-probs 0, the clip range [0.8, 1.2] and the constant 4."""
+    advantages = torch.tensor([1.0, -1.0])
+    return rl_loss(
+        logp,
+        torch.zeros(2, 4),
+        advantages,
+        MASK,
+        clip_low=0.2,
+        clip_high=0.2,
+        normalizer=normalizer,
+        constant=4,
+        **knobs,
+    )
+
+
+@pytest.mark.parametrize(
+    ("normalizer", "loss", "push"),
+    [
+        ("seq_mean", 0.0, [1 / 6, -1 / 2]),  # each answer's push is shared by its tokens
+        ("token_mean", -0.5, [1 / 4, -1 / 4]),  # every token pushed alike
+        ("constant", -0.25, [1 / 8, -1 / 8]),  # alike, and smaller: / (2 rows * 4)
+    ],
+)
+def test_how_each_normalizer_shares_out_the_push(
+    normalizer: Normalizer, loss: float, push: list[float]
+):
+    logp = torch.zeros(2, 4, requires_grad=True)  # equal to the old log-probs: ratio 1
+    value = loss_of(logp, normalizer)
+    value.backward()
+    assert value.item() == pytest.approx(loss)
+    # Gradient descent moves each log-prob by minus its gradient: that is the push.
+    assert logp.grad is not None
+    right, wrong = push
+    torch.testing.assert_close(-logp.grad, torch.tensor([[right] * 3 + [0], [wrong, 0, 0, 0]]))
+
+
+def test_the_kl_term_adds_kl_coef_times_the_normalized_k3():
+    # The policy finds two of the right answer's tokens twice as likely as the reference does,
+    # r = 0.5 for each: k3 = 0.5 + ln 2 - 1 = 0.193. Averaged over the 4 answer tokens.
+    ref_logp = torch.log(torch.tensor([[0.5, 1.0, 0.5, 1.0], [1.0, 1.0, 1.0, 1.0]]))
+    without = loss_of(torch.zeros(2, 4)).item()
+    with_kl = loss_of(torch.zeros(2, 4), kl_coef=0.1, ref_logp=ref_logp).item()
+    assert with_kl - without == pytest.approx(0.1 * 2 * (0.5 + math.log(2) - 1) / 4)
+
+
+def test_a_kl_penalty_needs_the_references_log_probs():
+    with pytest.raises(ValueError, match="needs the reference"):
+        loss_of(torch.zeros(2, 4), kl_coef=0.04)
+
+
+def test_a_weight_of_0_takes_a_token_out_of_the_policy_term():
+    weights = torch.tensor([[1.0, 1, 1, 1], [0, 1, 1, 1]])  # the wrong answer's token weighs 0
+    assert loss_of(torch.zeros(2, 4), weights=weights).item() == -3 / 4  # 3 tokens of -1, / 4
+
+
+def test_nothing_outside_the_answers_reaches_the_loss():
+    wild = torch.where(MASK, 0.0, 123.0)  # e^123 is inf in float32: ratios of inf out there
+    knobs: dict[str, Any] = {"kl_coef": 0.04, "ref_logp": torch.zeros(2, 4)}
+    assert loss_of(wild, **knobs).item() == loss_of(torch.zeros(2, 4), **knobs).item()

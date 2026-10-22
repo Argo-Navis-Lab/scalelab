@@ -1,7 +1,8 @@
-"""Collector tests: the rollout and policy metrics by hand, the entropy estimate against the
-exact entropy, the policy metrics over real updates against the trainer's own, and a real
-run recording every metric at every step. Also the loop's new order: a step ends before its
-checkpoint, and the hooks hear of a checkpoint before it is saved."""
+"""Collector tests: the rollout, policy, optimization and system metrics by hand, the entropy
+estimate against the exact entropy, the policy metrics over real updates against the
+trainer's own, and a real run recording every metric at every step. Also the loop's new
+order: a step ends before its checkpoint, and the hooks hear of a checkpoint before it is
+saved."""
 
 import copy
 import math
@@ -16,14 +17,27 @@ from scalelab.core.checkpoint import CheckpointPolicy, latest_checkpoint
 from scalelab.core.config import AlgoConfig, ModelConfig, RLConfig, SamplingParams
 from scalelab.core.determinism import seed_everything
 from scalelab.models.transformer import Transformer
+from scalelab.rl.flops import StepFlops
 from scalelab.rl.loop import RLStepMetrics, rl_train
 from scalelab.rl.rollout import RolloutBatch, generate
 from scalelab.rl.sampling import log_probs
 from scalelab.rl.trainer import UpdateMetrics, rl_update
 from scalelab.tasks.arithmetic import ArithmeticTask
 from scalelab.tasks.tokenizer import EOS, PAD, encode
-from scalelab.telemetry.collectors import PolicyCollector, RolloutCollector, make_collectors
-from scalelab.telemetry.hooks import CheckpointEvent, Hook, RolloutEvent, StepEndEvent
+from scalelab.telemetry.collectors import (
+    OptimizationCollector,
+    PolicyCollector,
+    RolloutCollector,
+    SystemCollector,
+    make_collectors,
+)
+from scalelab.telemetry.hooks import (
+    CheckpointEvent,
+    Hook,
+    OptimizerStepEvent,
+    RolloutEvent,
+    StepEndEvent,
+)
 from scalelab.telemetry.sink import MetricsSink, read_metrics
 
 ALGOS = Path(__file__).resolve().parents[2] / "configs" / "algos"
@@ -34,10 +48,19 @@ TASK = ArithmeticTask()
 GROUPS = [("<bos>12+34=", ["#46<eos>", "#47<eos>"]), ("<bos>56-78=", ["#-22<eos>", "#-22"])]
 REWARDS = torch.tensor([1.0, 0.0, 1.0, 1.0])
 ADVANTAGES = torch.tensor([1.0, -1.0, 0.5, -0.5, 2.0, -2.0, 0.25, -0.25])  # made up
-# Every metric the collectors record, without their "rollout/" and "policy/" prefixes.
+# Every metric the collectors record, without its "rollout/", "policy/", "optim/" or "system/".
 ROLLOUT = {"reward_mean", "reward_std", "length_mean", "length_p95", "length_max", "truncated"}
 ANSWERS = {"entropy", "flat_groups"}  # the policy metrics read from the answers
 UPDATES = {"ratio_mean", "ratio_max", "clip_fraction", "kl_old", "advantage_mean", "advantage_std"}
+OPTIMIZATION = {"loss", "grad_norm", "grad_clipped"}
+PHASES = ("data", "generate", "score", "logprobs", "train")  # a step's, when it updates
+SYSTEM = {f"{phase}_s" for phase in (*PHASES, "step")} | {
+    "sample_tokens_per_s",
+    "train_tokens_per_s",
+    "sample_flops",
+    "logprobs_flops",
+    "train_flops",
+}  # and on a GPU (not here), peak_memory
 
 
 def batch_of(groups: list[tuple[str, list[str]]]) -> RolloutBatch:
@@ -69,6 +92,20 @@ def found(sink: MetricsSink, home: Path, step: int = 1) -> dict[str, float]:
     """What the sink holds for `step`, by metric name."""
     sink.flush()
     return {row.metric: row.value for row in read_metrics(home, sink.run_id) if row.step == step}
+
+
+def ended(
+    step: int, phases: dict[str, float] | None = None, peak_memory: int | None = None
+) -> StepEndEvent:
+    """The end of a step of `phases` (by default none), 8 seconds long, that cost 300 FLOPs
+    to sample, 20 to work out log-probs and 100 to train."""
+    return StepEndEvent(
+        step=step,
+        seconds=8.0,
+        phases=phases or {},
+        flops=StepFlops(sample=300, logprobs=20, train=100),
+        peak_memory=peak_memory,
+    )
 
 
 def preset(name: str) -> AlgoConfig:
@@ -158,7 +195,7 @@ def test_the_policy_metrics_of_the_answers_by_hand(tmp_path: Path):
     sink = MetricsSink(tmp_path, "run-a")
     collector = PolicyCollector(sink, preset("grpo"))
     collector.on_rollout(RolloutEvent(step=1, batch=batch_of(GROUPS), rewards=REWARDS))
-    collector.on_step_end(StepEndEvent(step=1))  # no update: nothing more to record
+    collector.on_step_end(ended(step=1))  # no update: nothing more to record
     assert found(sink, tmp_path) == pytest.approx(
         {
             "policy/entropy": 4.3 / 17,  # (4 x 0.1 + 4 x 0.2 + 5 x 0.3 + 4 x 0.4) / 17 tokens
@@ -192,7 +229,7 @@ def test_with_one_update_the_ratio_starts_and_stays_at_1(tmp_path: Path):
     sink = MetricsSink(tmp_path, "run-a")
     collector = PolicyCollector(sink, preset("grpo"))
     update(make(), [collector], epochs=1)
-    collector.on_step_end(StepEndEvent(step=1))
+    collector.on_step_end(ended(step=1))
     metrics = found(sink, tmp_path)
     assert metrics["policy/ratio_mean"] == pytest.approx(1.0, abs=1e-5)
     assert metrics["policy/ratio_max"] == pytest.approx(1.0, abs=1e-5)
@@ -204,7 +241,7 @@ def test_over_several_updates_the_policy_metrics_agree_with_the_trainers(tmp_pat
     sink = MetricsSink(tmp_path, "run-a")
     collector = PolicyCollector(sink, preset("grpo"))
     updates = update(make(), [collector], epochs=3)
-    collector.on_step_end(StepEndEvent(step=1))
+    collector.on_step_end(ended(step=1))
     metrics = found(sink, tmp_path)
     # Every epoch counts the same tokens, so the step's share is the epochs' mean share.
     clip_fraction = sum(u.clip_fraction for u in updates) / 3
@@ -222,9 +259,85 @@ def test_each_step_starts_its_sums_afresh(tmp_path: Path):
     sink = MetricsSink(tmp_path, "run-a")
     collector = PolicyCollector(sink, preset("grpo"))
     update(make(), [collector], epochs=3)
-    collector.on_step_end(StepEndEvent(step=1))
-    collector.on_step_end(StepEndEvent(step=2))  # a step with no update
+    collector.on_step_end(ended(step=1))
+    collector.on_step_end(ended(step=2))  # a step with no update
     assert found(sink, tmp_path, step=2) == {}
+
+
+# --- the optimization collector -------------------------------------------------------------
+
+
+def test_the_optimization_metrics_by_hand(tmp_path: Path):
+    sink = MetricsSink(tmp_path, "run-a")
+    collector = OptimizationCollector(sink)
+    model = make()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    for epoch, (loss, grad_norm) in enumerate([(0.3, 0.5), (0.2, 1.5), (0.1, 3.0)]):
+        collector.on_optimizer_step(
+            OptimizerStepEvent(
+                step=1,
+                epoch=epoch,
+                model=model,
+                optimizer=optimizer,
+                loss=loss,
+                grad_norm=grad_norm,
+                grad_clip=1.0,
+            )
+        )
+    collector.on_step_end(ended(step=1))
+    collector.on_step_end(ended(step=2))  # a step with no update
+    assert found(sink, tmp_path) == pytest.approx(
+        {
+            "optim/loss": 0.2,
+            "optim/grad_norm": 5 / 3,
+            "optim/grad_clipped": 2 / 3,  # 1.5 and 3.0 were cut down to 1
+        }
+    )
+    assert found(sink, tmp_path, step=2) == {}
+
+
+# --- the system collector -------------------------------------------------------------------
+
+SECONDS = {"data": 0.5, "generate": 2.0, "score": 0.25, "logprobs": 1.0, "train": 4.0}
+
+
+def test_the_system_metrics_by_hand(tmp_path: Path):
+    sink = MetricsSink(tmp_path, "run-a")
+    collector = SystemCollector(sink)
+    collector.on_rollout(RolloutEvent(step=1, batch=batch_of(GROUPS), rewards=REWARDS))
+    update(make(), [collector], epochs=3)
+    collector.on_step_end(ended(step=1, phases=SECONDS))
+    batch = roll(make(), 4)  # the rows update() trained on, in micro-batches of 4
+    read = 3 * sum(batch.rows(start, start + 4).tokens[:, :-1].numel() for start in (0, 4))
+    assert found(sink, tmp_path) == pytest.approx(
+        {
+            "system/data_s": 0.5,
+            "system/generate_s": 2.0,
+            "system/score_s": 0.25,
+            "system/logprobs_s": 1.0,
+            "system/train_s": 4.0,
+            "system/step_s": 8.0,
+            "system/sample_tokens_per_s": 17 / 2.0,  # GROUPS' answers: 4 + 4 + 5 + 4 tokens
+            "system/train_tokens_per_s": read / 4.0,
+            "system/sample_flops": 300,
+            "system/logprobs_flops": 20,
+            "system/train_flops": 100,
+        }
+    )
+
+
+def test_a_step_without_an_update_starts_afresh_and_a_gpu_records_its_peak(tmp_path: Path):
+    sink = MetricsSink(tmp_path, "run-a")
+    collector = SystemCollector(sink)
+    update(make(), [collector], epochs=1)  # step 1 updates...
+    collector.on_step_end(ended(step=1, phases=SECONDS))
+    collector.on_rollout(RolloutEvent(step=2, batch=batch_of(GROUPS), rewards=REWARDS))
+    no_update = {"data": 0.5, "generate": 2.0, "score": 0.25}  # ...and step 2 doesn't
+    collector.on_step_end(ended(step=2, phases=no_update, peak_memory=3 * 2**30))
+    metrics = found(sink, tmp_path, step=2)
+    assert "system/train_s" not in metrics and "system/train_tokens_per_s" not in metrics
+    assert metrics["system/sample_tokens_per_s"] == 17 / 2.0
+    assert metrics["system/peak_memory"] == 3 * 2**30
 
 
 # --- a real run -----------------------------------------------------------------------------
@@ -235,14 +348,26 @@ def test_a_run_records_every_metric_at_every_step(tmp_path: Path, algo: str, ref
     sink = MetricsSink(tmp_path, "run-a")
     metrics = train(algo, [*make_collectors(sink, preset(algo)), sink], tmp_path)
     rows = read_metrics(tmp_path, "run-a")
-    names = {f"rollout/{name}" for name in ROLLOUT} | {
-        f"policy/{name}" for name in ANSWERS | UPDATES | ({"kl_ref"} if reference else set())
-    }
+    names = (
+        {f"rollout/{name}" for name in ROLLOUT}
+        | {f"policy/{name}" for name in ANSWERS | UPDATES | ({"kl_ref"} if reference else set())}
+        | {f"optim/{name}" for name in OPTIMIZATION}
+        | {f"system/{name}" for name in SYSTEM}
+    )
+    spent = 0
     for step in metrics:
         at_step = {row.metric: row.value for row in rows if row.step == step.step}
         assert at_step.keys() == names
         assert all(math.isfinite(value) for value in at_step.values())
         assert at_step["rollout/reward_mean"] == step.reward  # the same mean of the same rewards
+        assert at_step["optim/loss"] == step.loss  # one update a step: its mean is that one
+        assert at_step["optim/grad_norm"] == step.grad_norm
+        assert at_step["optim/grad_clipped"] == (step.grad_norm > 1.0)  # RLConfig's grad_clip
+        phases = sum(at_step[f"system/{phase}_s"] for phase in PHASES)
+        assert 0 < phases <= at_step["system/step_s"]
+        cost = sum(at_step[f"system/{phase}_flops"] for phase in ("sample", "logprobs", "train"))
+        assert spent + cost == step.flops  # the cost model's count of this step alone
+        spent = step.flops
 
 
 def test_a_step_ends_before_its_checkpoint_which_hooks_hear_of_before_it_is_saved(

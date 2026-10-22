@@ -28,6 +28,7 @@ from scalelab.rl.trainer import UpdateMetrics, rl_update
 from scalelab.rl.warmstart_loop import make_optimizer
 from scalelab.tasks.base import Task
 from scalelab.telemetry.hooks import CheckpointEvent, Hook, RolloutEvent, StepEndEvent
+from scalelab.telemetry.timing import StepTimer
 
 GENERATION_BATCH = 512  # answers decoded at once: a whole step of 64 problems x 8 answers
 
@@ -100,7 +101,10 @@ def rl_train[P](
     pretends the job is interrupted after step k. `on_step`, if given, is called with each
     step's metrics before any saving. Each of `hooks` is called once a step's answers are
     scored (on_rollout), by the updates (see trainer.rl_update), when the step is over
-    (on_step_end) and before each checkpoint is saved (on_checkpoint).
+    (on_step_end) and before each checkpoint is saved (on_checkpoint). A step's phases,
+    timed for on_step_end: data (drawing problems: the data-wait time), generate, score,
+    then with an update logprobs (preparing it, and the old and reference log-probs) and
+    train.
     """
     policy = policy or CheckpointPolicy()
     optimizer = make_optimizer(model, config)
@@ -119,10 +123,13 @@ def rl_train[P](
         flops = state["flops"]
 
     metrics: list[RLStepMetrics] = []
+    timer = StepTimer(model.embed.weight.device)
     while not budget_spent(config, step, flops):
         step += 1  # the step being taken
+        timer.start()
         problems = sample_problems(task, data_rng, config.prompts_per_step, difficulties, excluded)
         prompts = [task.format_prompt(problem) for problem in problems]
+        timer.lap("data")
         batch = generate(
             model,
             prompts,
@@ -132,9 +139,11 @@ def rl_train[P](
             policy_version=step - 1,  # the number of steps that have changed the weights
             batch_size=GENERATION_BATCH,
         )
+        timer.lap("generate")
         rewards = reward_values(score_rollouts(task, problems, batch), algo.format_weight)
         if algo.overlong == "soft_penalty":
             rewards = rewards + overlong_penalty(batch, context, algo.overlong_buffer)
+        timer.lap("score")
         scored = RolloutEvent(step=step, batch=batch, rewards=rewards)
         for hook in hooks:
             hook.on_rollout(scored)
@@ -157,9 +166,10 @@ def rl_train[P](
                 grad_clip=config.grad_clip,
                 reference=reference,
                 hooks=hooks,
+                timer=timer,
                 step=step,
             )
-        flops += rl_step_flops(
+        cost = rl_step_flops(
             spec,
             batch,
             trained if updates else None,  # no update: only the sampling was done
@@ -167,7 +177,8 @@ def rl_train[P](
             micro_batch=config.micro_batch,
             epochs=config.epochs,
             reference=algo.kl_coef > 0,
-        ).total
+        )
+        flops += cost.total
         last = updates[-1] if updates else None
         metrics.append(
             RLStepMetrics(
@@ -181,7 +192,13 @@ def rl_train[P](
                 kl=last.kl if last else 0.0,
             )
         )
-        ended = StepEndEvent(step=step)
+        ended = StepEndEvent(
+            step=step,
+            seconds=timer.seconds(),
+            phases=dict(timer.phases),
+            flops=cost,
+            peak_memory=timer.peak_memory(),
+        )
         for hook in hooks:
             hook.on_step_end(ended)
         if on_step is not None:

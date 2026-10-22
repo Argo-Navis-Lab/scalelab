@@ -128,10 +128,15 @@ def test_a_killed_rl_run_resumes_to_the_same_weights_and_grades(
     ]
     assert grades[0] == grades[1]  # step 0 from before the kill, the end from after it
     measured = [
-        [(row.step, row.metric, row.value) for row in read_metrics(h, run_id)]
+        [
+            (row.step, row.metric, None if row.metric.endswith("_s") else row.value)
+            for row in read_metrics(h, run_id)
+        ]
         for h in (straight, killed)
     ]
-    assert measured[0] == measured[1]  # and the same metrics (m2s28)
+    # And the same metrics (m2s28), values included but for seconds and per-second rates
+    # (m2s29): the resumed run read its own clock.
+    assert measured[0] == measured[1]
 
 
 def test_periodic_saving_keeps_only_the_last_two(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

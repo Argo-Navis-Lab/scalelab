@@ -10,7 +10,13 @@ from torch import Tensor
 from scalelab.core.config import AlgoConfig
 from scalelab.rl.filters import varied_groups
 from scalelab.rl.losses import clip_engaged, kl_k3
-from scalelab.telemetry.hooks import ForwardEvent, Hook, RolloutEvent, StepEndEvent
+from scalelab.telemetry.hooks import (
+    ForwardEvent,
+    Hook,
+    OptimizerStepEvent,
+    RolloutEvent,
+    StepEndEvent,
+)
 from scalelab.telemetry.sink import MetricsSink
 
 # What RolloutCollector records, in order, each named "rollout/<name>".
@@ -125,6 +131,72 @@ class PolicyCollector(Hook):
         self.sums, self.largest, self.answers, self.reference = [], [], 0, False
 
 
+# What OptimizationCollector records, in order, each named "optim/<name>".
+OPTIMIZATION_METRICS = ("loss", "grad_norm", "grad_clipped")
+
+
+class OptimizationCollector(Hook):
+    """Every step's updates (one per epoch), each metric a mean over them: the loss over the
+    whole batch before the update, the gradient's global norm before clipping, and the share
+    of updates whose gradient clipping cut down. A step with no update records nothing."""
+
+    def __init__(self, sink: MetricsSink) -> None:
+        self.sink = sink
+        self.updates: list[tuple[float, float, float]] = []  # loss, norm, 1.0 if clipped
+
+    def on_optimizer_step(self, event: OptimizerStepEvent) -> None:
+        clipped = float(event.grad_norm > event.grad_clip)
+        self.updates.append((event.loss, event.grad_norm, clipped))
+
+    def on_step_end(self, event: StepEndEvent) -> None:
+        if self.updates:
+            columns = zip(*self.updates, strict=True)  # the losses, the norms, the clipped
+            for name, values in zip(OPTIMIZATION_METRICS, columns, strict=True):
+                self.sink.record(event.step, f"optim/{name}", sum(values) / len(values))
+        self.updates = []
+
+
+class SystemCollector(Hook):
+    """Every step's cost. Wall-clock seconds, each phase's (see rl_train) and the whole
+    step's; answer tokens written per second of generation, and tokens the updates read
+    (padding included, every epoch) per second of training; the step's FLOPs by phase, as the
+    cost model counts them; and on a GPU the most memory its tensors held at once, in bytes."""
+
+    def __init__(self, sink: MetricsSink) -> None:
+        self.sink = sink
+        self.written = 0  # the step's answer tokens, <eos> included
+        self.read = 0  # the tokens the step's updates read
+
+    def on_rollout(self, event: RolloutEvent) -> None:
+        batch = event.batch
+        self.written = int((batch.lengths - batch.prompt_lengths).sum())
+
+    def on_forward(self, event: ForwardEvent) -> None:
+        rows, width = event.batch.tokens.shape
+        self.read += rows * (width - 1)  # the trainer reads every row but its last token
+
+    def on_step_end(self, event: StepEndEvent) -> None:
+        measured = {f"{phase}_s": seconds for phase, seconds in event.phases.items()}
+        measured["step_s"] = event.seconds
+        if self.written:
+            measured["sample_tokens_per_s"] = self.written / event.phases["generate"]
+        if self.read:  # the step updated the model
+            measured["train_tokens_per_s"] = self.read / event.phases["train"]
+        measured["sample_flops"] = event.flops.sample
+        measured["logprobs_flops"] = event.flops.logprobs
+        measured["train_flops"] = event.flops.train
+        if event.peak_memory is not None:
+            measured["peak_memory"] = event.peak_memory
+        for name, value in measured.items():
+            self.sink.record(event.step, f"system/{name}", value)
+        self.written, self.read = 0, 0
+
+
 def make_collectors(sink: MetricsSink, algo: AlgoConfig) -> list[Hook]:
     """Every collector, each recording into `sink`."""
-    return [RolloutCollector(sink), PolicyCollector(sink, algo)]
+    return [
+        RolloutCollector(sink),
+        PolicyCollector(sink, algo),
+        OptimizationCollector(sink),
+        SystemCollector(sink),
+    ]

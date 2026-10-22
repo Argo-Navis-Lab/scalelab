@@ -2,12 +2,14 @@
 that overrides the points it needs. The trainer calls every hook it is given at each point,
 and never knows what they do."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import torch
 from torch import Tensor
 
 from scalelab.models.transformer import Transformer
+from scalelab.rl.flops import StepFlops
 from scalelab.rl.rollout import RolloutBatch
 
 
@@ -52,7 +54,9 @@ class OptimizerStepEvent:
     epoch: int
     model: Transformer
     optimizer: torch.optim.Optimizer
+    loss: float  # the update's loss over the whole batch, before the step
     grad_norm: float  # the gradient's size before clipping
+    grad_clip: float  # the size clipping cuts a bigger gradient down to
 
 
 @dataclass(frozen=True)
@@ -60,6 +64,10 @@ class StepEndEvent:
     """A step is over: its answers were scored and its updates, if any, are done."""
 
     step: int
+    seconds: float  # the step's wall-clock time so far
+    phases: Mapping[str, float]  # seconds by phase, see rl_train
+    flops: StepFlops  # what the step cost, as the cost model counts it
+    peak_memory: int | None  # the most bytes its tensors held at once on a GPU; None on a CPU
 
 
 @dataclass(frozen=True)

@@ -254,5 +254,5 @@ def test_an_rl_run_records_what_the_collectors_measure_at_every_step(
     assert sorted({row.step for row in rows}) == list(range(1, steps + 1))
     for step in range(1, steps + 1):
         names = {row.metric for row in rows if row.step == step}
-        assert len(names) == 15  # 6 rollout/ and 9 policy/ metrics, kl_ref included: GRPO
-        assert {"rollout/reward_mean", "policy/entropy", "policy/kl_ref"} <= names
+        assert len(names) == 29  # 6 rollout/, 9 policy/ (kl_ref: GRPO), 3 optim/, 11 system/
+        assert {"rollout/reward_mean", "policy/kl_ref", "optim/loss", "system/step_s"} <= names

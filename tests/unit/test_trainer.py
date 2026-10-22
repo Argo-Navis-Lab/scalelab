@@ -210,12 +210,16 @@ def test_the_gradient_is_clipped():
     assert moved.norm().item() == pytest.approx(1e-3, rel=1e-3)  # ...and cut down to it
 
 
-def test_nothing_to_learn_changes_nothing():
+@pytest.mark.parametrize("normalizer", ["seq_mean", "token_mean", "constant"])
+def test_nothing_to_learn_changes_nothing(normalizer: Normalizer):
     model = make()
     start = [p.detach().clone() for p in model.parameters()]
     batch = roll(model, 1.0)
     nothing = torch.zeros_like(batch.response_mask)  # every token left out of the loss
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
-    assert rl_update(model, optimizer, batch, ADVANTAGES, nothing, algo(), temperature=1.0) == []
+    # m2s29: "constant" divides by a number of rows, never 0, and so it used to go on and
+    # divide the clipped tokens by 0 tokens.
+    mask, settings = nothing, algo(normalizer)
+    assert rl_update(model, optimizer, batch, ADVANTAGES, mask, settings, temperature=1.0) == []
     for p, s in zip(model.parameters(), start, strict=True):
         assert torch.equal(p, s)

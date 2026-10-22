@@ -12,6 +12,7 @@ from scalelab.rl.losses import clip_engaged, kl_k3, normalizer_size, rl_loss
 from scalelab.rl.rollout import RolloutBatch
 from scalelab.rl.sampling import log_probs
 from scalelab.telemetry.hooks import BackwardEvent, ForwardEvent, Hook, OptimizerStepEvent
+from scalelab.telemetry.timing import StepTimer
 
 
 def answer_logprobs(model: Transformer, batch: RolloutBatch, temperature: float) -> Tensor:
@@ -56,6 +57,7 @@ def rl_update(
     reference: Transformer | None = None,
     hooks: Sequence[Hook] = (),
     step: int = 0,
+    timer: StepTimer | None = None,
 ) -> list[UpdateMetrics]:
     """Train `model` on a scored batch: `epochs` updates, each a pass over all its rows in
     micro-batches of `micro_batch` rows (their gradients add up), then one optimizer step
@@ -68,20 +70,23 @@ def rl_update(
 
     Each of `hooks` is called after every micro-batch's loss (on_forward), once an update's
     gradients are complete (on_backward) and after each optimizer step (on_optimizer_step),
-    told `step`: the RL step this is.
+    told `step`: the RL step this is. `timer`, if given, laps "logprobs" once the old (and
+    reference) log-probs are ready and "train" once the updates are done.
     """
     if algo.kl_coef > 0 and reference is None:
         raise ValueError("a KL penalty (kl_coef > 0) needs the reference model")
     device = model.embed.weight.device
     advantages, mask = advantages.to(device), mask.to(device)
     total = normalizer_size(mask, algo.normalizer)
-    if total == 0:
+    if not mask.any():  # m2s29: not total == 0, as "constant" counts rows, tokens or not
         return []
     with torch.no_grad():
         old_logp = answer_logprobs(model, batch, temperature)
         ref_logp = None
         if algo.kl_coef > 0 and reference is not None:
             ref_logp = answer_logprobs(reference, batch, temperature)
+    if timer is not None:
+        timer.lap("logprobs")
 
     rows, tokens = len(batch.finish_reasons), int(mask.sum())
     metrics: list[UpdateMetrics] = []
@@ -136,7 +141,13 @@ def rl_update(
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
         stepped = OptimizerStepEvent(
-            step=step, epoch=epoch, model=model, optimizer=optimizer, grad_norm=grad_norm.item()
+            step=step,
+            epoch=epoch,
+            model=model,
+            optimizer=optimizer,
+            loss=loss_sum,
+            grad_norm=grad_norm.item(),
+            grad_clip=grad_clip,
         )
         for hook in hooks:
             hook.on_optimizer_step(stepped)
@@ -148,4 +159,6 @@ def rl_update(
                 kl=kl_sum / tokens,
             )
         )
+    if timer is not None:
+        timer.lap("train")
     return metrics

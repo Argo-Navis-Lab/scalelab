@@ -13,6 +13,7 @@ import torch
 from scalelab.cli import main
 from scalelab.core.checkpoint import latest_checkpoint, load_checkpoint
 from scalelab.core.registry import Registry
+from scalelab.telemetry.sink import read_metrics
 
 EXPERIMENTS = Path(__file__).resolve().parents[2] / "configs" / "experiments"
 HELLO, RL = EXPERIMENTS / "hello.yaml", EXPERIMENTS / "rl.yaml"
@@ -126,6 +127,11 @@ def test_a_killed_rl_run_resumes_to_the_same_weights_and_grades(
         for h in (straight, killed)
     ]
     assert grades[0] == grades[1]  # step 0 from before the kill, the end from after it
+    measured = [
+        [(row.step, row.metric, row.value) for row in read_metrics(h, run_id)]
+        for h in (straight, killed)
+    ]
+    assert measured[0] == measured[1]  # and the same metrics (m2s28)
 
 
 def test_periodic_saving_keeps_only_the_last_two(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

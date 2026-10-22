@@ -12,6 +12,7 @@ import pytest
 from scalelab.cli import main
 from scalelab.core.envcapture import EnvInfo
 from scalelab.core.registry import Registry
+from scalelab.telemetry.sink import read_metrics
 
 HELLO = Path(__file__).resolve().parents[2] / "configs" / "experiments" / "hello.yaml"
 RL = HELLO.parent / "rl.yaml"
@@ -233,3 +234,25 @@ def test_rl_from_a_warm_start_of_another_model_is_refused(
     error = f"rl.from_run {warm_start} trained model m1, not this experiment's model m2"
     assert error in capsys.readouterr().err
     assert len(Registry.sqlite(home / "registry.db").list_runs()) == 1  # only the warm start
+
+
+# --- added in m2s28: telemetry --------------------------------------------------------------
+
+
+def test_an_rl_run_records_what_the_collectors_measure_at_every_step(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    warm_start = warm_started(home)
+    assert main(["run", str(RL), *SMALL_RL, f"rl.from_run={warm_start}"]) == 0
+    output = capsys.readouterr().out
+    (rl,) = [
+        run for run in Registry.sqlite(home / "registry.db").list_runs() if run.run_id != warm_start
+    ]
+    assert f"metrics:       {home / 'metrics' / rl.run_id}" in output
+    steps = int(re.findall(r"done: ran (\d+) steps", output)[-1])
+    rows = read_metrics(home, rl.run_id)
+    assert sorted({row.step for row in rows}) == list(range(1, steps + 1))
+    for step in range(1, steps + 1):
+        names = {row.metric for row in rows if row.step == step}
+        assert len(names) == 15  # 6 rollout/ and 9 policy/ metrics, kl_ref included: GRPO
+        assert {"rollout/reward_mean", "policy/entropy", "policy/kl_ref"} <= names

@@ -56,8 +56,16 @@ class OptimizerStepEvent:
 
 
 @dataclass(frozen=True)
+class StepEndEvent:
+    """A step is over: its answers were scored and its updates, if any, are done."""
+
+    step: int
+
+
+@dataclass(frozen=True)
 class CheckpointEvent:
-    """A checkpoint has been saved: the run would resume from here if it died now."""
+    """A checkpoint of this step is about to be saved. A resumed run starts after it, so
+    whatever a hook keeps about the steps so far must be on disk before it is."""
 
     step: int
 
@@ -83,5 +91,8 @@ class Hook:
     def on_optimizer_step(self, event: OptimizerStepEvent) -> None:
         """An update has changed the weights."""
 
+    def on_step_end(self, event: StepEndEvent) -> None:
+        """A step is over."""
+
     def on_checkpoint(self, event: CheckpointEvent) -> None:
-        """A checkpoint has been saved."""
+        """A checkpoint is about to be saved."""

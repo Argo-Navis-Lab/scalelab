@@ -27,6 +27,9 @@ from scalelab.tasks.arithmetic import ArithmeticProblem, ArithmeticTask
 from scalelab.tasks.base import Task
 from scalelab.tasks.countdown import CountdownProblem, CountdownTask
 from scalelab.tasks.evalsets import EVAL_SETS, eval_set_name, read_eval_set
+from scalelab.telemetry.collectors import make_collectors
+from scalelab.telemetry.hooks import Hook
+from scalelab.telemetry.sink import MetricsSink
 
 # Called at each grading with the step's metrics and one result per eval set.
 Report = Callable[[StepMetrics, list[EvalResult]], None]
@@ -151,6 +154,7 @@ def run_rl_experiment(
     policy: CheckpointPolicy | None = None,
     deterministic: bool | None = None,
     report: RLReport | None = None,
+    sink: MetricsSink | None = None,
 ) -> list[RLStepMetrics]:
     """RL on the config's task, starting from `start`: the model rl.from_run ended with,
     which is also the KL penalty's reference (a copy is kept; `start` itself is trained).
@@ -160,7 +164,8 @@ def run_rl_experiment(
     The seed's "data" stream picks the problems and its "sampling" stream the answers. With
     a `report`, the model is graded before the first step (step 0: the warm start's own
     grade, R_0), every config.eval.every steps and after the last one. Grading changes
-    nothing about training, and its FLOPs aren't part of the budget.
+    nothing about training, and its FLOPs aren't part of the budget. With a `sink`, every
+    collector measures every step and records it there (telemetry).
     """
     if config.algo is None or config.rl is None:
         raise ValueError(f"{config.name} is not an RL experiment: it has no algo and rl sections")
@@ -175,6 +180,9 @@ def run_rl_experiment(
     reference = copy.deepcopy(model) if algo.kl_coef > 0 else None  # the warm start, kept
     task, problem_type = make_task(config.task.name, config.task.ops)
     eval_sets = load_eval_sets(task, problem_type, config.task.difficulties, config.eval.problems)
+    hooks: list[Hook] = []
+    if sink is not None:
+        hooks = [*make_collectors(sink, algo), sink]  # the sink last: it writes what they record
 
     def grade(metrics: RLStepMetrics | None) -> None:
         if report is None:
@@ -202,4 +210,5 @@ def run_rl_experiment(
         reference,
         eval_prompts(task, problem_type),
         on_step=grade,
+        hooks=hooks,
     )

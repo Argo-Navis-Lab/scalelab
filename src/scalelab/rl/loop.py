@@ -27,7 +27,7 @@ from scalelab.rl.scoring import reward_values, score_rollouts
 from scalelab.rl.trainer import UpdateMetrics, rl_update
 from scalelab.rl.warmstart_loop import make_optimizer
 from scalelab.tasks.base import Task
-from scalelab.telemetry.hooks import CheckpointEvent, Hook, RolloutEvent
+from scalelab.telemetry.hooks import CheckpointEvent, Hook, RolloutEvent, StepEndEvent
 
 GENERATION_BATCH = 512  # answers decoded at once: a whole step of 64 problems x 8 answers
 
@@ -99,8 +99,8 @@ def rl_train[P](
     every 15 minutes, keeping 2), and the last step is always saved. `stop_after=k`
     pretends the job is interrupted after step k. `on_step`, if given, is called with each
     step's metrics before any saving. Each of `hooks` is called once a step's answers are
-    scored (on_rollout), by the updates (see trainer.rl_update), and after each checkpoint
-    is saved (on_checkpoint).
+    scored (on_rollout), by the updates (see trainer.rl_update), when the step is over
+    (on_step_end) and before each checkpoint is saved (on_checkpoint).
     """
     policy = policy or CheckpointPolicy()
     optimizer = make_optimizer(model, config)
@@ -181,11 +181,17 @@ def rl_train[P](
                 kl=last.kl if last else 0.0,
             )
         )
+        ended = StepEndEvent(step=step)
+        for hook in hooks:
+            hook.on_step_end(ended)
         if on_step is not None:
             on_step(metrics[-1])
         if step == stop_after:
             policy.request_stop()
         if budget_spent(config, step, flops) or policy.due(step):
+            saving = CheckpointEvent(step=step)
+            for hook in hooks:
+                hook.on_checkpoint(saving)  # before saving: see CheckpointEvent
             state = {
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
@@ -197,9 +203,6 @@ def rl_train[P](
             save_checkpoint(checkpoint_dir, step, state, home)
             prune_checkpoints(checkpoint_dir, policy.keep, home)
             policy.saved()
-            saved = CheckpointEvent(step=step)
-            for hook in hooks:
-                hook.on_checkpoint(saved)
             if policy.stop_requested:
                 break
     return metrics

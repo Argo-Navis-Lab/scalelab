@@ -31,6 +31,7 @@ from scalelab.rl.experiment import (
 from scalelab.rl.finished import load_finished_run
 from scalelab.rl.loop import RLStepMetrics
 from scalelab.rl.warmstart_loop import StepMetrics
+from scalelab.telemetry.sink import MetricsSink, metrics_folder
 
 EXIT_USAGE = 2  # the command line asked for something impossible
 EXIT_INTERRUPTED = 130  # stopped early with a checkpoint saved; run again to resume
@@ -200,6 +201,7 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
     if config.rl is not None:
         start = load_warm_start(config.rl.from_run, config.model, registry, home)
         print(f"warm start:    {config.rl.from_run}")
+        print(f"metrics:       {metrics_folder(home, run_id)}")
 
     # Speed is measured between gradings, from the time and the token (or FLOP) count at the
     # last one. A resumed run's count isn't known here, so its first grading shows none.
@@ -269,8 +271,9 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
                     config, seed, checkpoints, home, policy, deterministic, report=report
                 )
             else:
+                sink = MetricsSink(home, run_id)  # what the collectors measure goes here
                 metrics = run_rl_experiment(
-                    config, seed, start, checkpoints, home, policy, deterministic, rl_report
+                    config, seed, start, checkpoints, home, policy, deterministic, rl_report, sink
                 )
         except Exception:
             registry.finish_run(run_id, "failed")

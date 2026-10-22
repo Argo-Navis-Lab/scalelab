@@ -3,12 +3,14 @@ reduces what it is shown to a few numbers where the tensors are (the GPU, on a G
 moves them to the CPU in one go."""
 
 import math
+from typing import Any, cast
 
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 
 from scalelab.core.config import AlgoConfig
-from scalelab.models.transformer import Transformer
+from scalelab.models.attention.base import Attention
+from scalelab.models.transformer import Block, Transformer
 from scalelab.rl.filters import varied_groups
 from scalelab.rl.losses import clip_engaged, kl_k3
 from scalelab.telemetry.hooks import (
@@ -339,6 +341,107 @@ class AdamCollector(Hook):
         self.measured = None
 
 
+# m2s31: what ActivationCollector records about each part of the model, the first from a
+# mean, the second from a largest value: the residual stream after layers 0 to n_layers, the
+# attention of the blocks (layers 1 to n_layers), and the output (no layer).
+STREAM_METRICS = ("activations/rms", "activations/abs_max")
+ATTENTION_METRICS = ("attention/entropy", "attention/max_logit")
+OUTPUT_METRICS = ("output/z_mean", "output/max_logit")
+
+
+def summary(mean_of: Tensor, max_of: Tensor, real: Tensor) -> Tensor:
+    """(3,): the sum of `mean_of`'s entries, how many there are, and the largest of `max_of`'s,
+    counting only the positions `real` (rows, seq) marks. Both are (rows, seq, k). Sums,
+    counts and maxima of several micro-batches combine into the whole step's.
+
+    torch.where leaves the other positions out (even an inf or NaN there) without picking
+    entries out, which would make the CPU wait for the GPU to count them."""
+    inside = real[..., None]  # (rows, seq, 1): the same for each of the k
+    return torch.stack(
+        [
+            torch.where(inside, mean_of, 0).sum(),
+            inside.sum() * mean_of.shape[-1],
+            torch.where(inside, max_of, -math.inf).amax(),
+        ]
+    )
+
+
+class ActivationCollector(Hook):
+    """On the steps `cadence` picks, what the forward passes of the step's first update work
+    out, at every position whose next token is real (the prompt's and the answer's, not
+    PAD's): the RMS and the largest absolute entry of the residual stream after the embedding
+    (layer 0) and after each block (layers 1 to n_layers); each block's attention, by the
+    mean entropy of its weights (in nats, over heads and positions) and the largest
+    pre-softmax logit q.k / sqrt(head_dim); and the output, by the mean log-sum-exp z of the
+    logits (what z-loss pushes towards 0) and the largest logit.
+
+    The trainer's pass keeps none of these, so each micro-batch is read again, without
+    gradients, through PyTorch forward hooks on the model's modules: each reduces its
+    module's output to a few numbers as the pass goes, and all come off after it.
+    """
+
+    def __init__(self, sink: MetricsSink, cadence: Cadence) -> None:
+        self.sink = sink
+        self.cadence = cadence
+        self.n_layers = 0
+        self.parts: list[Tensor] = []  # one (2 n_layers + 2, 3) per micro-batch, see summary
+
+    def on_forward(self, event: ForwardEvent) -> None:
+        if event.epoch > 0 or not self.cadence.due(event.step):
+            return
+        model, batch = event.model, event.batch
+        device = model.embed.weight.device
+        tokens = batch.tokens[:, :-1].to(device)  # what the trainer read (see answer_logprobs)
+        real = (torch.arange(tokens.shape[1]) < batch.lengths[:, None] - 1).to(device)
+        stream: list[Tensor] = []  # after the embedding, then after each block
+        attention: list[Tensor] = []
+        output: list[Tensor] = []
+
+        def on_stream(module: nn.Module, args: tuple[Any, ...], x: Tensor) -> None:
+            stream.append(summary(x.square(), x.abs(), real))
+
+        def on_attention(module: nn.Module, args: tuple[Any, ...], out: Tensor) -> None:
+            scores = cast(Attention, module).scores(*args)  # (rows, heads, seq, seq)
+            entropy = torch.special.entr(scores.softmax(dim=-1)).sum(dim=-1)  # sum of -p log p
+            top = scores.amax(dim=-1)  # each query's largest
+            attention.append(summary(entropy.transpose(1, 2), top.transpose(1, 2), real))
+
+        def on_output(module: nn.Module, args: tuple[Any, ...], logits: Tensor) -> None:
+            output.append(summary(logits.logsumexp(dim=-1, keepdim=True), logits, real))
+
+        blocks = [cast(Block, block) for block in model.blocks]
+        handles = [model.embed.register_forward_hook(on_stream)]
+        for block in blocks:
+            handles.append(block.attn.register_forward_hook(on_attention))
+            handles.append(block.register_forward_hook(on_stream))  # its output is the stream
+        handles.append(model.head.register_forward_hook(on_output))
+        try:
+            with torch.no_grad():
+                model(tokens)
+        finally:  # even if the pass fails, the model is left as it was
+            for handle in handles:
+                handle.remove()
+        self.n_layers = len(blocks)
+        self.parts.append(torch.stack([*stream, *attention, *output]))
+
+    def on_step_end(self, event: StepEndEvent) -> None:
+        if self.parts:
+            parts = torch.stack(self.parts)  # (micro-batches, 2 n_layers + 2, 3)
+            averages = parts[..., 0].sum(dim=0) / parts[..., 1].sum(dim=0)
+            stream = slice(0, self.n_layers + 1)
+            averages[stream] = averages[stream].sqrt()  # the stream's mean squares: its RMS
+            means, maxima = torch.stack([averages, parts[..., 2].amax(dim=0)]).tolist()
+            places = [
+                *((STREAM_METRICS, layer) for layer in range(self.n_layers + 1)),
+                *((ATTENTION_METRICS, layer) for layer in range(1, self.n_layers + 1)),
+                (OUTPUT_METRICS, None),
+            ]
+            for (names, layer), mean, largest in zip(places, means, maxima, strict=True):
+                self.sink.record(event.step, names[0], mean, layer)
+                self.sink.record(event.step, names[1], largest, layer)
+        self.parts = []
+
+
 def make_collectors(
     sink: MetricsSink, algo: AlgoConfig, cadence: Cadence | None = None
 ) -> list[Hook]:
@@ -352,4 +455,5 @@ def make_collectors(
         SystemCollector(sink),
         LayerCollector(sink, cadence),
         AdamCollector(sink, cadence),
+        ActivationCollector(sink, cadence),
     ]

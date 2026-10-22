@@ -3,11 +3,13 @@ estimate against the exact entropy, the policy metrics over real updates against
 trainer's own, and a real run recording every metric at every step. Also the loop's new
 order: a step ends before its checkpoint, and the hooks hear of a checkpoint before it is
 saved. Then (m2s30) the detailed collectors: their cadence, the layers, the layer and Adam
-metrics by hand, the steps they skip, and a real run measuring every layer when they are due."""
+metrics by hand, the steps they skip, and a real run measuring every layer when they are due.
+Then (m2s31) the activation collector: its metrics by hand, the updates it skips, and a run."""
 
 import copy
 import math
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -17,7 +19,7 @@ import yaml
 from scalelab.core.checkpoint import CheckpointPolicy, latest_checkpoint
 from scalelab.core.config import AlgoConfig, ModelConfig, RLConfig, SamplingParams
 from scalelab.core.determinism import seed_everything
-from scalelab.models.transformer import Transformer
+from scalelab.models.transformer import Block, Transformer
 from scalelab.rl.flops import StepFlops
 from scalelab.rl.loop import RLStepMetrics, rl_train
 from scalelab.rl.rollout import RolloutBatch, generate
@@ -27,6 +29,10 @@ from scalelab.tasks.arithmetic import ArithmeticTask
 from scalelab.tasks.tokenizer import EOS, PAD, encode
 from scalelab.telemetry.collectors import (
     ADAM_METRICS,
+    ATTENTION_METRICS,
+    OUTPUT_METRICS,
+    STREAM_METRICS,
+    ActivationCollector,
     AdamCollector,
     Cadence,
     LayerCollector,
@@ -39,6 +45,7 @@ from scalelab.telemetry.collectors import (
 )
 from scalelab.telemetry.hooks import (
     CheckpointEvent,
+    ForwardEvent,
     Hook,
     OptimizerStepEvent,
     RolloutEvent,
@@ -540,7 +547,7 @@ def test_a_run_measures_every_layer_on_the_steps_its_cadence_picks(tmp_path: Pat
     sink = MetricsSink(tmp_path, "run-a")
     train("grpo", [*make_collectors(sink, preset("grpo"), Cadence(every=2)), sink], tmp_path)
     rows = read_metrics(tmp_path, "run-a")
-    per_layer = {(row.step, row.metric, row.layer) for row in rows if row.layer is not None}
+    per_layer = {(row.step, row.metric, row.layer) for row in rows if row.metric in DETAILED}
     # Of steps 1 to 3, only step 2. The tiny untrained model's answers may all score the
     # same, leaving every gradient zero: then Adam's v has nothing to show yet.
     names = {metric for _, metric, _ in per_layer}
@@ -549,3 +556,116 @@ def test_a_run_measures_every_layer_on_the_steps_its_cadence_picks(tmp_path: Pat
     grad_norm = found(sink, tmp_path, step=2)["optim/grad_norm"]
     grads = by_layer(sink, tmp_path, "optim/layer_grad_norm", step=2)
     assert math.hypot(*grads.values()) == pytest.approx(grad_norm, rel=1e-5)
+
+
+# --- added in m2s31: the activation collector -----------------------------------------------
+
+STREAM = range(TINY.n_layers + 1)  # the residual stream: after the embedding, after each block
+BLOCKS = range(1, TINY.n_layers + 1)
+
+
+def forwarded(
+    model: Transformer, batch: RolloutBatch, step: int = 1, epoch: int = 0
+) -> ForwardEvent:
+    """A forward pass of update `epoch` of `step` over `batch`. Its numbers are made up: the
+    activation collector reads only the model and the rows."""
+    zeros = torch.zeros(batch.tokens.shape)
+    return ForwardEvent(
+        step=step,
+        epoch=epoch,
+        model=model,
+        batch=batch,
+        logp=zeros,
+        old_logp=zeros,
+        ref_logp=None,
+        advantages=torch.zeros(batch.tokens.shape[0]),
+        mask=batch.response_mask,
+        loss=torch.tensor(0.0),
+    )
+
+
+def test_the_activation_metrics_by_hand(tmp_path: Path):
+    sink = MetricsSink(tmp_path, "run-a")
+    collector = ActivationCollector(sink, Cadence(every=1))
+    model = make()
+    with torch.no_grad():  # the second block's queries are all 0, and so are its scores
+        dict(model.named_parameters())["blocks.1.attn.q.weight"].zero_()
+    batch = batch_of(GROUPS)  # 4 rows of 11, 11, 12 and 11 tokens
+    for start in (0, 2):  # two micro-batches, each cut to its own width
+        collector.on_forward(forwarded(model, batch.rows(start, start + 2)))
+    collector.on_step_end(ended(step=1))
+    hooked = [m for m in model.modules() if m._forward_hooks]  # pyright: ignore[reportPrivateUsage]
+    assert hooked == []  # the collector took its hooks off again
+    assert all(p.grad is None for p in model.parameters())
+    # By hand, the whole batch at once, picking out the positions whose next token is real.
+    tokens = batch.tokens[:, :-1]
+    positions = torch.arange(tokens.shape[1])
+    real = positions < batch.lengths[:, None] - 1
+    stream: list[torch.Tensor] = []
+    entropy: list[float] = []
+    top: list[float] = []
+    with torch.no_grad():
+        x = model.embed(tokens)
+        stream.append(x[real])
+        for block in [cast(Block, block) for block in model.blocks]:
+            scores = block.attn.scores(block.attn_norm(x), model.rope, positions)
+            weights = scores.transpose(1, 2)[real].softmax(dim=-1)  # (positions, heads, keys)
+            entropy.append(float(-torch.xlogy(weights, weights).sum(dim=-1).mean()))
+            top.append(float(scores.transpose(1, 2)[real].max()))
+            x = block(x, model.rope, positions)
+            stream.append(x[real])
+        logits = model(tokens)[real]  # (positions, vocab)
+    rms = {layer: float(s.square().mean().sqrt()) for layer, s in zip(STREAM, stream, strict=True)}
+    assert by_layer(sink, tmp_path, "activations/rms") == pytest.approx(rms, rel=1e-5)
+    biggest = {layer: float(s.abs().max()) for layer, s in zip(STREAM, stream, strict=True)}
+    assert by_layer(sink, tmp_path, "activations/abs_max") == pytest.approx(biggest, rel=1e-5)
+    # With every score 0, the query at position t spreads its weight evenly over the t + 1
+    # keys it may see: an entropy of log(t + 1).
+    even = float(torch.log(positions + 1.0).expand_as(real)[real].mean())
+    assert entropy[1] == pytest.approx(even, rel=1e-5)
+    assert by_layer(sink, tmp_path, "attention/entropy") == pytest.approx(
+        {1: entropy[0], 2: even}, rel=1e-5
+    )
+    assert by_layer(sink, tmp_path, "attention/max_logit") == pytest.approx(
+        {1: top[0], 2: 0.0}, rel=1e-5
+    )
+    output = found(sink, tmp_path)
+    assert output["output/max_logit"] == pytest.approx(float(logits.max()), rel=1e-5)
+    z_mean = float(logits.logsumexp(dim=-1).mean())
+    assert output["output/z_mean"] == pytest.approx(z_mean, rel=1e-5)
+
+
+def test_the_activation_collector_reads_only_the_first_update_of_a_due_step(tmp_path: Path):
+    sink = MetricsSink(tmp_path, "run-a")
+    collector = ActivationCollector(sink, Cadence(every=2))
+    model, batch = make(), batch_of(GROUPS)
+    passes: list[int] = []
+
+    def count(*_: object) -> None:
+        passes.append(1)
+
+    model.register_forward_hook(count)  # counts the model's forward passes
+    collector.on_forward(forwarded(model, batch, step=1))  # not due
+    collector.on_step_end(ended(step=1))
+    collector.on_forward(forwarded(model, batch, step=2, epoch=1))  # due, but the second update
+    collector.on_step_end(ended(step=2))
+    assert passes == []
+    assert found(sink, tmp_path, step=1) == found(sink, tmp_path, step=2) == {}
+    collector.on_forward(forwarded(model, batch, step=4))  # due, the first update
+    collector.on_step_end(ended(step=4))
+    assert passes == [1]
+    assert set(OUTPUT_METRICS) <= found(sink, tmp_path, step=4).keys()
+
+
+def test_a_run_measures_the_activations_on_the_steps_its_cadence_picks(tmp_path: Path):
+    sink = MetricsSink(tmp_path, "run-a")
+    train("grpo", [*make_collectors(sink, preset("grpo"), Cadence(every=2)), sink], tmp_path)
+    groups = ("activations/", "attention/", "output/")
+    rows = [row for row in read_metrics(tmp_path, "run-a") if row.metric.startswith(groups)]
+    expected = (
+        {(2, name, layer) for name in STREAM_METRICS for layer in STREAM}
+        | {(2, name, layer) for name in ATTENTION_METRICS for layer in BLOCKS}
+        | {(2, name, None) for name in OUTPUT_METRICS}
+    )
+    assert {(row.step, row.metric, row.layer) for row in rows} == expected  # only step 2
+    assert all(math.isfinite(row.value) for row in rows)

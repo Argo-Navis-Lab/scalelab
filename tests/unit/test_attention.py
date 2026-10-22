@@ -1,4 +1,5 @@
-"""Attention tests: the maths by hand, no peeking ahead, QK-norm, parameters and cache size."""
+"""Attention tests: the maths by hand, no peeking ahead, QK-norm, parameters and cache size,
+and (m2s31) the scores telemetry reads."""
 
 import math
 
@@ -132,3 +133,20 @@ def test_attention_itself_is_only_an_interface():
     assert isinstance(make(), Attention)
     with pytest.raises(TypeError, match="abstract"):
         Attention()  # pyright: ignore[reportAbstractUsage]
+
+
+# --- added in m2s31: the scores telemetry reads ---------------------------------------------
+
+
+@pytest.mark.parametrize("qk_norm", [False, True], ids=["plain", "qk-norm"])
+def test_the_scores_are_the_ones_forward_weighs_the_values_by(qk_norm: bool):
+    attn, x = make(qk_norm), randn(2, SEQ, D_MODEL)
+    scores = attn.scores(x, ROPE, POSITIONS)
+    assert scores.shape == (2, N_HEADS, SEQ, SEQ)
+    future = torch.ones(SEQ, SEQ, dtype=torch.bool).triu(diagonal=1)
+    assert bool(scores[..., future].isneginf().all())  # no peeking ahead
+    assert bool(scores[..., ~future].isfinite().all())
+    v = attn.v(x).view(2, SEQ, N_HEADS, attn.head_dim).transpose(1, 2)
+    mixed = scores.softmax(dim=-1) @ v  # (batch, heads, seq, head_dim)
+    joined = mixed.transpose(1, 2).reshape(2, SEQ, D_MODEL)
+    torch.testing.assert_close(attn.o(joined), attn(x, ROPE, POSITIONS))

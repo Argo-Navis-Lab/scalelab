@@ -28,6 +28,7 @@ class ForwardEvent:
 
     step: int
     epoch: int  # which of the step's updates: 0 for the first
+    model: Transformer  # m2s31: the weights the pass used
     batch: RolloutBatch  # the micro-batch's rows
     logp: Tensor  # (rows, width) the trainer's log-probs of the answer tokens
     old_logp: Tensor  # the same before the step's first update: where the ratio starts

@@ -1,5 +1,7 @@
 """Multi-head attention (MHA): the reference variant, with one key and value per head."""
 
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -37,6 +39,12 @@ class MultiHeadAttention(Attention):
         q, k, v = self._project(x, rope, positions)
         out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         return self.o(self._join_heads(out))
+
+    def scores(self, x: Tensor, rope: RotaryEmbedding, positions: Tensor) -> Tensor:
+        q, k, _ = self._project(x, rope, positions)
+        logits = q @ k.transpose(-2, -1) / math.sqrt(self.head_dim)  # SDPA's default scale
+        future = positions[None, :] > positions[:, None]  # True where the key comes later
+        return logits.masked_fill(future, float("-inf"))
 
     def decode(self, x: Tensor, rope: RotaryEmbedding, cache: LayerCache, start: int) -> Tensor:
         positions = torch.arange(start, start + x.shape[1], device=x.device)

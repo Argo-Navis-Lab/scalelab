@@ -34,6 +34,13 @@ class Attention(nn.Module, ABC):
         """
 
     @abstractmethod
+    def scores(self, x: Tensor, rope: RotaryEmbedding, positions: Tensor) -> Tensor:
+        """The attention scores forward() works with, for telemetry (m2s31): (batch, heads,
+        seq, seq), each query's pre-softmax logit for each key, and -inf for the keys after
+        the query. A softmax over the last dimension turns them into the attention weights.
+        forward() leaves them inside SDPA, which need never store them all at once."""
+
+    @abstractmethod
     def decode(self, x: Tensor, rope: RotaryEmbedding, cache: LayerCache, start: int) -> Tensor:
         """Attention for new tokens at positions start, start + 1, ..., using the cache for
         every earlier position, and storing the new tokens' keys and values in it. Reading a

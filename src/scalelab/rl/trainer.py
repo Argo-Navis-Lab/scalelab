@@ -116,6 +116,7 @@ def rl_update(
             forward = ForwardEvent(
                 step=step,
                 epoch=epoch,
+                model=model,
                 batch=part,
                 logp=logp.detach(),  # hooks see the numbers, not the graph behind them
                 old_logp=part_old,

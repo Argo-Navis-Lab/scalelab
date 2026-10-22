@@ -8,9 +8,11 @@ import torch
 from torch import Tensor
 
 from scalelab.core.config import AlgoConfig
+from scalelab.models.transformer import Transformer
 from scalelab.rl.filters import varied_groups
 from scalelab.rl.losses import clip_engaged, kl_k3
 from scalelab.telemetry.hooks import (
+    BackwardEvent,
     ForwardEvent,
     Hook,
     OptimizerStepEvent,
@@ -192,11 +194,162 @@ class SystemCollector(Hook):
         self.written, self.read = 0, 0
 
 
-def make_collectors(sink: MetricsSink, algo: AlgoConfig) -> list[Hook]:
-    """Every collector, each recording into `sink`."""
+# m2s30: the detailed collectors (a number per layer) measure every DETAIL_EVERY steps, and
+# every step for the DETAIL_AFTER_ALERT steps after a detector raises an alert.
+DETAIL_EVERY = 10
+DETAIL_AFTER_ALERT = 50
+
+
+class Cadence:
+    """Which steps the detailed collectors measure: every `every` steps, and every step for
+    the `after_alert` steps after a detector raises an alert. The detailed collectors share
+    one Cadence, so they all measure the same steps. A run asks about its steps in order."""
+
+    def __init__(self, every: int = DETAIL_EVERY, after_alert: int = DETAIL_AFTER_ALERT) -> None:
+        self.every = every
+        self.after_alert = after_alert
+        self.until = 0  # the last step an alert asked for; 0 before any alert
+
+    def due(self, step: int) -> bool:
+        """Whether the detailed collectors measure `step`."""
+        return step % self.every == 0 or step <= self.until
+
+    def alert(self, step: int) -> None:
+        """A detector fired at `step`: measure each of the next `after_alert` steps."""
+        self.until = max(self.until, step + self.after_alert)
+
+
+def layers(model: Transformer) -> list[list[Tensor]]:
+    """The model's parameters by layer, numbered as the residual stream is: layer 0 is the
+    embedding, layers 1 to n_layers are the blocks in order, and layer n_layers + 1 is the
+    final norm with the output head."""
+    return [
+        list(model.embed.parameters()),
+        *(list(block.parameters()) for block in model.blocks),
+        [*model.norm.parameters(), *model.head.parameters()],
+    ]
+
+
+def layer_norms(tensors: list[list[Tensor]]) -> Tensor:
+    """(layers,) each layer's norm over all its tensors' entries: the norm of their norms."""
+    norm = torch.linalg.vector_norm
+    return torch.stack([norm(torch.stack([norm(t) for t in layer])) for layer in tensors])
+
+
+class LayerCollector(Hook):
+    """On the steps `cadence` picks, each layer's (see layers) part in the updates: the norm
+    of its gradient before clipping (the squares of the layers' norms add up to the square
+    of the global norm), and the size of the update next to the size of the weights: the RMS
+    of the change it made over the RMS of the weights before it. Each is a mean over the
+    step's updates."""
+
+    def __init__(self, sink: MetricsSink, cadence: Cadence) -> None:
+        self.sink = sink
+        self.cadence = cadence
+        self.grad_norms: Tensor | None = None  # (layers,) the update in progress's
+        self.before: list[list[Tensor]] = []  # a copy of the weights it is about to change
+        self.updates: list[Tensor] = []  # one (2, layers) per update: grad norms, ratios
+
+    def on_backward(self, event: BackwardEvent) -> None:
+        if not self.cadence.due(event.step):
+            return
+        weights = layers(event.model)
+        grads = [[p.grad for p in layer if p.grad is not None] for layer in weights]
+        self.grad_norms = layer_norms(grads)
+        self.before = [[p.detach().clone() for p in layer] for layer in weights]
+
+    def on_optimizer_step(self, event: OptimizerStepEvent) -> None:
+        if self.grad_norms is None:  # not a step to measure
+            return
+        changes = [
+            [p.detach() - old for p, old in zip(layer, before, strict=True)]
+            for layer, before in zip(layers(event.model), self.before, strict=True)
+        ]
+        # Both RMSs are over the same entries, so their ratio is the ratio of the norms.
+        ratios = layer_norms(changes) / layer_norms(self.before)
+        self.updates.append(torch.stack([self.grad_norms, ratios]))
+        self.grad_norms, self.before = None, []
+
+    def on_step_end(self, event: StepEndEvent) -> None:
+        if self.updates:
+            grad_norms, ratios = torch.stack(self.updates).mean(dim=0).tolist()
+            for layer, (grad_norm, ratio) in enumerate(zip(grad_norms, ratios, strict=True)):
+                self.sink.record(event.step, "optim/layer_grad_norm", grad_norm, layer)
+                self.sink.record(event.step, "optim/update_ratio", ratio, layer)
+        self.updates = []
+
+
+# What AdamCollector records for each layer, in order, each named "adam/<name>".
+ADAM_METRICS = ("v_min", "v_median", "v_max", "eps_dominated")
+
+
+class AdamCollector(Hook):
+    """On the steps `cadence` picks, each layer's (see layers) Adam second moments v after
+    the step's last update. Each v is bias-corrected (the v whose square root Adam divides
+    by), and only the entries that have had a gradient count (the embedding's rows for
+    tokens the task never uses have none): the smallest, median and largest v, and the
+    share of entries with sqrt(v) below 10 eps. In those eps, there only so that Adam never
+    divides by zero, is more than 1/11 of the denominator sqrt(v) + eps and holds the update
+    back. A layer none of whose entries has had a gradient yet records nothing, and neither
+    does an optimizer without second moments."""
+
+    def __init__(self, sink: MetricsSink, cadence: Cadence) -> None:
+        self.sink = sink
+        self.cadence = cadence
+        self.measured: Tensor | None = None  # (layers, 4) after the latest update
+
+    def on_optimizer_step(self, event: OptimizerStepEvent) -> None:
+        if not self.cadence.due(event.step):
+            return
+        optimizer = event.optimizer
+        group_of = {id(p): group for group in optimizer.param_groups for p in group["params"]}
+        rows: list[Tensor] = []
+        for layer in layers(event.model):
+            values: list[Tensor] = []  # the layer's corrected v, zeros included
+            small: list[Tensor] = []  # whether each entry's sqrt(v) is below 10 eps
+            for p in layer:
+                state, group = optimizer.state.get(p, {}), group_of[id(p)]  # get adds nothing
+                if "exp_avg_sq" not in state:  # not Adam
+                    return
+                beta2, updates = group["betas"][1], float(state["step"])
+                corrected = (state["exp_avg_sq"] / (1 - beta2**updates)).flatten()
+                values.append(corrected)
+                small.append((corrected > 0) & (corrected.sqrt() < 10 * group["eps"]))
+            v = torch.cat(values)
+            seen = v > 0  # the entries that have had a gradient
+            rows.append(
+                torch.stack(
+                    [
+                        torch.where(seen, v, math.inf).min(),
+                        torch.where(seen, v, math.nan).nanmedian(),  # NaNs don't count
+                        v.max(),
+                        torch.cat(small).sum() / seen.sum(),
+                    ]
+                )
+            )
+        self.measured = torch.stack(rows)
+
+    def on_step_end(self, event: StepEndEvent) -> None:
+        if self.measured is not None:
+            for layer, values in enumerate(self.measured.tolist()):
+                if values[2] == 0:  # the largest v: no entry has had a gradient yet
+                    continue
+                for name, value in zip(ADAM_METRICS, values, strict=True):
+                    self.sink.record(event.step, f"adam/{name}", value, layer)
+        self.measured = None
+
+
+def make_collectors(
+    sink: MetricsSink, algo: AlgoConfig, cadence: Cadence | None = None
+) -> list[Hook]:
+    """Every collector, each recording into `sink`. The detailed ones measure on the steps
+    `cadence` picks: by default every DETAIL_EVERY steps."""
+    cadence = cadence or Cadence()
     return [
         RolloutCollector(sink),
         PolicyCollector(sink, algo),
         OptimizationCollector(sink),
         SystemCollector(sink),
+        LayerCollector(sink, cadence),
+        AdamCollector(sink, cadence),
     ]

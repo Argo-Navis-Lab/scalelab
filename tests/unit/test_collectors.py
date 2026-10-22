@@ -2,7 +2,8 @@
 estimate against the exact entropy, the policy metrics over real updates against the
 trainer's own, and a real run recording every metric at every step. Also the loop's new
 order: a step ends before its checkpoint, and the hooks hear of a checkpoint before it is
-saved."""
+saved. Then (m2s30) the detailed collectors: their cadence, the layers, the layer and Adam
+metrics by hand, the steps they skip, and a real run measuring every layer when they are due."""
 
 import copy
 import math
@@ -25,10 +26,15 @@ from scalelab.rl.trainer import UpdateMetrics, rl_update
 from scalelab.tasks.arithmetic import ArithmeticTask
 from scalelab.tasks.tokenizer import EOS, PAD, encode
 from scalelab.telemetry.collectors import (
+    ADAM_METRICS,
+    AdamCollector,
+    Cadence,
+    LayerCollector,
     OptimizationCollector,
     PolicyCollector,
     RolloutCollector,
     SystemCollector,
+    layers,
     make_collectors,
 )
 from scalelab.telemetry.hooks import (
@@ -393,3 +399,153 @@ def test_a_step_ends_before_its_checkpoint_which_hooks_hear_of_before_it_is_save
         ("step_end", 3, None),
         ("checkpoint", 3, "step-000000002.json"),
     ]
+
+
+# --- added in m2s30: the detailed collectors ------------------------------------------------
+
+DETAILED = {"optim/layer_grad_norm", "optim/update_ratio"} | {
+    f"adam/{name}" for name in ADAM_METRICS
+}
+LAYERS = range(TINY.n_layers + 2)  # the embedding, the blocks, the head
+
+
+def by_layer(sink: MetricsSink, home: Path, metric: str, step: int = 1) -> dict[int | None, float]:
+    """What the sink holds for `metric` at `step`, by layer."""
+    sink.flush()
+    rows = read_metrics(home, sink.run_id)
+    return {row.layer: row.value for row in rows if row.step == step and row.metric == metric}
+
+
+def stepped(model: Transformer, optimizer: torch.optim.Optimizer, epoch: int) -> OptimizerStepEvent:
+    """Update number `epoch` of step 1 is done (its loss and gradient norm made up)."""
+    return OptimizerStepEvent(
+        step=1,
+        epoch=epoch,
+        model=model,
+        optimizer=optimizer,
+        loss=0.0,
+        grad_norm=0.0,
+        grad_clip=1.0,
+    )
+
+
+def flat(tensors: list[torch.Tensor]) -> torch.Tensor:
+    return torch.cat([t.detach().flatten() for t in tensors])
+
+
+def test_the_cadence_measures_every_k_steps_and_each_step_for_a_while_after_an_alert():
+    assert (Cadence().every, Cadence().after_alert) == (10, 50)  # the blueprint's defaults
+    cadence = Cadence(every=10, after_alert=50)
+    assert [step for step in range(1, 101) if cadence.due(step)] == list(range(10, 101, 10))
+    due: list[int] = []
+    for step in range(1, 101):  # a run's steps, in order
+        if cadence.due(step):
+            due.append(step)
+        if step in (25, 30):  # a detector fires at the end of the step: steps 26 to 75
+            cadence.alert(step)  # then another, inside that window: now to 80
+    assert due == [10, 20, *range(26, 81), 90, 100]
+
+
+def test_the_layers_hold_every_parameter_once_in_order():
+    model = make()
+    parts = layers(model)
+    assert len(parts) == len(LAYERS)
+    assert len(parts[0]) == 1 and parts[0][0] is model.embed.weight
+    assert parts[-1][-1] is model.head.weight
+    assert all(a is b for a, b in zip(parts[1], model.blocks[0].parameters(), strict=True))
+    held = [id(p) for part in parts for p in part]
+    assert sorted(held) == sorted(id(p) for p in model.parameters())  # each one, once
+
+
+def test_the_layer_metrics_by_hand(tmp_path: Path):
+    sink = MetricsSink(tmp_path, "run-a")
+    collector = LayerCollector(sink, Cadence(every=1))
+    model = make()
+    before = copy.deepcopy(model)
+    (metrics,) = update(model, [collector], epochs=1)
+    collector.on_step_end(ended(step=1))
+    # The gradients are still there, clipped (to rl_update's grad_clip, 1): clipping scaled
+    # every one of them by the same factor.
+    scale = min(1.0, 1.0 / (metrics.grad_norm + 1e-6))
+    grads: list[float] = []
+    ratios: list[float] = []
+    for new, old in zip(layers(model), layers(before), strict=True):
+        grads.append(float(flat([p.grad for p in new if p.grad is not None]).norm()) / scale)
+        change = flat(new) - flat(old)
+        ratios.append(float(change.square().mean().sqrt() / flat(old).square().mean().sqrt()))
+    assert math.hypot(*grads) == pytest.approx(metrics.grad_norm, rel=1e-5)
+    expected = dict(enumerate(grads))
+    assert by_layer(sink, tmp_path, "optim/layer_grad_norm") == pytest.approx(expected, rel=1e-5)
+    expected = dict(enumerate(ratios))
+    assert by_layer(sink, tmp_path, "optim/update_ratio") == pytest.approx(expected, rel=1e-5)
+
+
+def test_the_adam_metrics_by_hand(tmp_path: Path):
+    sink = MetricsSink(tmp_path, "run-a")
+    collector = AdamCollector(sink, Cadence(every=1))
+    model = make()
+    parts = layers(model)
+    # make_optimizer's two groups, the norms' weights (vectors) with a far bigger eps: 1e-2,
+    # so 10 eps is 0.1. The matrices' eps is the default, 1e-8: 10 eps is 1e-7.
+    matrices = [p for p in model.parameters() if p.dim() >= 2]
+    vectors = [p for p in model.parameters() if p.dim() < 2]
+    groups = [{"params": matrices}, {"params": vectors, "eps": 1e-2}]
+    optimizer = torch.optim.AdamW(groups, lr=1e-3)
+    for epoch in range(2):  # two updates in step 1, with the same gradients
+        for p in model.parameters():
+            p.grad = torch.full_like(p, 1e-3)  # sqrt(v) is 1e-3
+        for p in parts[2]:
+            p.grad = torch.zeros_like(p)  # the second block has no gradient at all
+        grad = torch.full_like(model.embed.weight, 1e-3)
+        grad[0] = 1e-9  # token 0's row, 64 entries: sqrt(v) is 1e-9, below 10 eps
+        grad[1] = 0.0  # token 1's row: no gradient, so not counted
+        model.embed.weight.grad = grad
+        optimizer.step()
+        collector.on_optimizer_step(stepped(model, optimizer, epoch))
+    collector.on_step_end(ended(step=1))
+    # With the same gradient g at every update, the corrected v is g squared after each
+    # one. The uncorrected v after the second is 0.001999 g squared.
+    smallest = {0: 1e-18, 1: 1e-6, 3: 1e-6}  # nothing for layer 2
+    # abs=0: approx also allows an absolute 1e-12 by default, which would pass any v near 1e-18.
+    assert by_layer(sink, tmp_path, "adam/v_min") == pytest.approx(smallest, rel=1e-5, abs=0)
+    everywhere = {0: 1e-6, 1: 1e-6, 3: 1e-6}
+    assert by_layer(sink, tmp_path, "adam/v_median") == pytest.approx(everywhere, rel=1e-5)
+    assert by_layer(sink, tmp_path, "adam/v_max") == pytest.approx(everywhere, rel=1e-5)
+
+    def share_of_vectors(part: list[torch.Tensor]) -> float:
+        return sum(p.numel() for p in part if p.dim() < 2) / sum(p.numel() for p in part)
+
+    shares = {0: 64 / (64 * 64 - 64), 1: share_of_vectors(parts[1]), 3: share_of_vectors(parts[3])}
+    assert by_layer(sink, tmp_path, "adam/eps_dominated") == pytest.approx(shares)
+
+
+def test_the_detailed_collectors_skip_steps_not_due_and_optimizers_without_v(tmp_path: Path):
+    sink = MetricsSink(tmp_path, "run-a")
+    cadence = Cadence(every=2)
+    detailed: list[Hook] = [LayerCollector(sink, cadence), AdamCollector(sink, cadence)]
+    update(make(), detailed, epochs=1)  # step 1: not due
+    for collector in detailed:
+        collector.on_step_end(ended(step=1))
+    assert found(sink, tmp_path) == {}
+    model = make()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    adam = AdamCollector(sink, Cadence(every=1))
+    adam.on_optimizer_step(stepped(model, optimizer, 0))
+    adam.on_step_end(ended(step=1))
+    assert found(sink, tmp_path) == {}
+    assert optimizer.state == {}  # looked at, not touched
+
+
+def test_a_run_measures_every_layer_on_the_steps_its_cadence_picks(tmp_path: Path):
+    sink = MetricsSink(tmp_path, "run-a")
+    train("grpo", [*make_collectors(sink, preset("grpo"), Cadence(every=2)), sink], tmp_path)
+    rows = read_metrics(tmp_path, "run-a")
+    per_layer = {(row.step, row.metric, row.layer) for row in rows if row.layer is not None}
+    # Of steps 1 to 3, only step 2. The tiny untrained model's answers may all score the
+    # same, leaving every gradient zero: then Adam's v has nothing to show yet.
+    names = {metric for _, metric, _ in per_layer}
+    assert {"optim/layer_grad_norm", "optim/update_ratio"} <= names <= DETAILED
+    assert per_layer == {(2, name, layer) for name in names for layer in LAYERS}
+    grad_norm = found(sink, tmp_path, step=2)["optim/grad_norm"]
+    grads = by_layer(sink, tmp_path, "optim/layer_grad_norm", step=2)
+    assert math.hypot(*grads.values()) == pytest.approx(grad_norm, rel=1e-5)

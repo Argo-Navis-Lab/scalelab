@@ -198,6 +198,9 @@ class RuntimeConfig(StrictModel):
     # Also save a checkpoint every this many steps. None: only every 15 minutes, when asked
     # to stop, and at the end.
     checkpoint_every: int | None = Field(default=None, gt=0)
+    # m2s36: False runs RL without telemetry (no collectors, metrics or detectors), to see
+    # what it costs; `scalelab overhead` measures exactly that. Warm starts have none.
+    telemetry: bool = True
 
 
 # --- composing a config from several files --------------------------------------------

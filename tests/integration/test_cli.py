@@ -257,3 +257,35 @@ def test_an_rl_run_records_what_the_collectors_measure_at_every_step(
         # 6 rollout/, 9 policy/ (kl_ref: GRPO), 3 optim/, 11 system/, 8 numerics/, 4 mismatch/
         assert len(names) == 41
         assert {"rollout/reward_mean", "policy/kl_ref", "optim/loss", "system/step_s"} <= names
+
+
+# --- added in m2s36: the telemetry off switch, and what telemetry costs ---------------------
+
+
+def test_with_telemetry_off_an_rl_run_records_no_metrics(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    warm_start = warm_started(home)
+    off = ["runtime.telemetry=false", f"rl.from_run={warm_start}"]
+    assert main(["run", str(RL), *SMALL_RL, *off]) == 0
+    assert "metrics:       off" in capsys.readouterr().out
+    assert not (home / "metrics").exists()
+
+
+def test_overhead_times_the_steps_without_and_with_telemetry_and_records_nothing(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    warm_start = warm_started(home)
+    before = sorted(home.rglob("*"))
+    registry = (home / "registry.db").read_bytes()
+    timed = ["--steps", "2", "--warmup", "1"]
+    code = main(["overhead", str(RL), *SMALL_RL, f"rl.from_run={warm_start}", *timed])
+    output = capsys.readouterr().out
+    assert f"warm start:    {warm_start}" in output
+    assert "steps:         1 to warm up, then 2 timed; without, then with telemetry" in output
+    assert re.search(r"without: +\d+\.\d{3} s a step", output)
+    assert re.search(r"with: +\d+\.\d{3} s a step \(\d+ detector events\)", output)
+    assert re.search(r"overhead: +[-+]\d+\.\d% of step time, (within|OVER) the 5% budget", output)
+    assert code == (0 if "within the 5% budget" in output else 1)
+    assert sorted(home.rglob("*")) == before  # no metrics, no checkpoints, no runs
+    assert (home / "registry.db").read_bytes() == registry

@@ -157,6 +157,7 @@ def run_rl_experiment(
     report: RLReport | None = None,
     sink: MetricsSink | None = None,
     on_anomaly: Callable[[AnomalyEvent], None] = ignore,
+    on_step: Callable[[RLStepMetrics], None] | None = None,
 ) -> list[RLStepMetrics]:
     """RL on the config's task, starting from `start`: the model rl.from_run ended with,
     which is also the KL penalty's reference (a copy is kept; `start` itself is trained).
@@ -168,7 +169,8 @@ def run_rl_experiment(
     grade, R_0), every config.eval.every steps and after the last one. Grading changes
     nothing about training, and its FLOPs aren't part of the budget. With a `sink`, every
     collector measures every step and records it there (telemetry), and the online
-    detectors judge what they measured: each event goes to `on_anomaly`.
+    detectors judge what they measured: each event goes to `on_anomaly`. `on_step`, if
+    given, is called with each step's metrics before that step is graded.
     """
     if config.algo is None or config.rl is None:
         raise ValueError(f"{config.name} is not an RL experiment: it has no algo and rl sections")
@@ -200,6 +202,11 @@ def run_rl_experiment(
                 return
         report(metrics, *grade_rl(model, task, eval_sets))
 
+    def after_step(metrics: RLStepMetrics) -> None:
+        if on_step is not None:
+            on_step(metrics)  # m2s36: before grading, so a step's time leaves grading out
+        grade(metrics)
+
     if latest_checkpoint(checkpoint_dir) is None:  # a new run: grade the warm start first
         grade(None)
     return rl_train(
@@ -215,7 +222,7 @@ def run_rl_experiment(
         policy,
         reference,
         eval_prompts(task, problem_type),
-        on_step=grade,
+        on_step=after_step,
         hooks=hooks,
         monitor=monitor,
     )

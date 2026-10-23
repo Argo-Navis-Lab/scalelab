@@ -1,13 +1,14 @@
 """The `scalelab` command."""
 
 import argparse
+import contextlib
 import json
 import shutil
 import signal
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,13 @@ import torch
 
 from scalelab.core import hashing
 from scalelab.core.checkpoint import CheckpointPolicy
-from scalelab.core.config import ModelConfig, RuntimeConfig, load_config, parse_override
+from scalelab.core.config import (
+    ExperimentConfig,
+    ModelConfig,
+    RuntimeConfig,
+    load_config,
+    parse_override,
+)
 from scalelab.core.determinism import MAX_SEED, default_deterministic
 from scalelab.core.envcapture import EnvInfo, capture_env
 from scalelab.core.registry import AnomalyRecord, EvalRecord, OutdatedRegistryError, Registry
@@ -31,6 +38,7 @@ from scalelab.rl.experiment import (
 )
 from scalelab.rl.finished import load_finished_run
 from scalelab.rl.loop import SNAPSHOTS, RLStepMetrics
+from scalelab.rl.overhead import OVERHEAD_BUDGET, measure_overhead
 from scalelab.rl.warmstart_loop import StepMetrics
 from scalelab.telemetry.anomalies import AnomalyEvent, RunHalted
 from scalelab.telemetry.sink import MetricsSink, metrics_folder
@@ -38,6 +46,7 @@ from scalelab.telemetry.sink import MetricsSink, metrics_folder
 EXIT_USAGE = 2  # the command line asked for something impossible
 EXIT_INTERRUPTED = 130  # stopped early with a checkpoint saved; run again to resume
 EXIT_HALTED = 1  # m2s35: a detector's HALT stopped the run, recorded failed (as a crash is)
+EXIT_OVER_BUDGET = 1  # m2s36: `scalelab overhead` found telemetry costs more than its budget
 METRIC = "greedy_pass@1"  # the greedy grade's name in the evals table
 SAMPLED_KS = (1, 4)  # RL's sampled grades: pass@1, and pass@4 (how often 4 tries find it)
 
@@ -149,14 +158,40 @@ def same_uncommitted_changes(recorded_env_json: str, env: EnvInfo) -> bool:
     return recorded.git.diff_sha256 == env.git.diff_sha256
 
 
-def run(experiment: Path, overrides: Sequence[str]) -> int:
-    """`scalelab run`: resolve the experiment, record it, run it (or resume it), finish it."""
+def resolve(
+    experiment: Path, overrides: Sequence[str]
+) -> tuple[ExperimentConfig, int, RuntimeConfig]:
+    """The experiment's config with `overrides` applied, the seed, and the runtime settings."""
     try:
         seed, runtime_values, config_overrides = split_overrides(overrides)
         config = load_config(experiment, config_overrides)
         runtime = RuntimeConfig.model_validate(runtime_values)
     except (ValueError, FileNotFoundError) as err:  # pydantic's ValidationError is a ValueError
         raise UsageError(str(err)) from None
+    return config, seed, runtime
+
+
+@contextlib.contextmanager
+def registry_copy(home: Path) -> Generator[Registry]:
+    """A private copy of <home>'s registry, for commands that only read it: the registry
+    itself is never locked or changed (on Colab it lives on Google Drive, where SQLite is
+    unreliable). The copy is deleted when the `with` block ends."""
+    source = registry_path(home)
+    if not source.is_file():
+        raise UsageError(f"no registry at {source}")
+    with tempfile.TemporaryDirectory() as folder:
+        copy = Path(folder) / "registry.db"
+        shutil.copyfile(source, copy)
+        try:
+            registry = Registry.sqlite(copy)
+        except OutdatedRegistryError as err:
+            raise UsageError(str(err)) from None
+        yield registry
+
+
+def run(experiment: Path, overrides: Sequence[str]) -> int:
+    """`scalelab run`: resolve the experiment, record it, run it (or resume it), finish it."""
+    config, seed, runtime = resolve(experiment, overrides)
 
     home = scalelab_home(default=runtime.output_dir)
     at_home = registry_path(home)
@@ -204,7 +239,8 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
     if config.rl is not None:
         start = load_warm_start(config.rl.from_run, config.model, registry, home)
         print(f"warm start:    {config.rl.from_run}")
-        print(f"metrics:       {metrics_folder(home, run_id)}")
+        telemetry = metrics_folder(home, run_id) if runtime.telemetry else "off"  # m2s36
+        print(f"metrics:       {telemetry}")
 
     # Speed is measured between gradings, from the time and the token (or FLOP) count at the
     # last one. A resumed run's count isn't known here, so its first grading shows none.
@@ -290,7 +326,8 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
                     config, seed, checkpoints, home, policy, deterministic, report=report
                 )
             else:
-                sink = MetricsSink(home, run_id)  # what the collectors measure goes here
+                # What the collectors measure goes here (m2s36: unless telemetry is off)
+                sink = MetricsSink(home, run_id) if runtime.telemetry else None
                 metrics = run_rl_experiment(
                     config,
                     seed,
@@ -346,17 +383,10 @@ def grade(run_id: str, problems: int) -> int:
     if problems < 1:
         raise UsageError(f"--problems must be at least 1, got {problems}")
     home = scalelab_home()
-    source = registry_path(home)
-    if not source.is_file():
-        raise UsageError(f"no registry at {source}")
-    with tempfile.TemporaryDirectory() as folder:
-        # Read a private copy, so the registry itself is never locked or changed: on Colab
-        # it lives on Google Drive, where SQLite is unreliable.
-        copy = Path(folder) / "registry.db"
-        shutil.copyfile(source, copy)
+    with registry_copy(home) as registry:
         try:
-            finished = load_finished_run(Registry.sqlite(copy), home, run_id)
-        except (ValueError, OutdatedRegistryError) as err:
+            finished = load_finished_run(registry, home, run_id)
+        except ValueError as err:
             raise UsageError(str(err)) from None
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -374,6 +404,36 @@ def grade(run_id: str, problems: int) -> int:
     return 0
 
 
+def overhead(experiment: Path, overrides: Sequence[str], steps: int, warmup: int) -> int:
+    """`scalelab overhead`: what telemetry adds to an RL experiment's step time. Runs its
+    first steps twice from its warm start, without telemetry and with it, and records
+    nothing. Exit code 1 if telemetry costs more than its budget."""
+    config, seed, runtime = resolve(experiment, overrides)
+    if config.rl is None:
+        raise UsageError(f"{config.name} is not an RL experiment: only RL has telemetry")
+    if steps < 1 or warmup < 1:
+        raise UsageError(f"--steps and --warmup must be at least 1, got {steps} and {warmup}")
+    home = scalelab_home(default=runtime.output_dir)
+    with registry_copy(home) as registry:
+        start = load_warm_start(config.rl.from_run, config.model, registry, home)
+    deterministic = runtime.deterministic
+    if deterministic is None:
+        deterministic = default_deterministic()
+    device = torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu"
+    print(f"experiment:    {config.name} (config {hashing.config_hash(config)}), seed {seed}")
+    print(f"warm start:    {config.rl.from_run}")
+    print(f"device:        {device}")
+    print(f"steps:         {warmup} to warm up, then {steps} timed; without, then with telemetry")
+    result = measure_overhead(config, seed, start, deterministic, steps, warmup)
+    events = len(result.on.events)
+    print(f"without:       {result.off.seconds:.3f} s a step")
+    print(f"with:          {result.on.seconds:.3f} s a step ({events} detector events)")
+    within = result.overhead <= OVERHEAD_BUDGET
+    verdict = f"{'within' if within else 'OVER'} the {OVERHEAD_BUDGET:.0%} budget"
+    print(f"overhead:      {result.overhead:+.1%} of step time, {verdict}")
+    return 0 if within else EXIT_OVER_BUDGET
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scalelab", description="ScaleLab command line.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -389,10 +449,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     grade_parser.add_argument(
         "--problems", type=int, default=1000, help="the first N of each eval set (default 1000)"
     )
+    overhead_parser = commands.add_parser(
+        "overhead", help="time an RL experiment's steps without and with telemetry"
+    )
+    overhead_parser.add_argument("experiment", type=Path, help="e.g. configs/experiments/rl.yaml")
+    overhead_parser.add_argument("overrides", nargs="*", help="key=value changes, as for run")
+    overhead_parser.add_argument(
+        "--steps", type=int, default=30, help="steps timed in each run (default 30)"
+    )
+    overhead_parser.add_argument(
+        "--warmup", type=int, default=5, help="steps before the timed ones (default 5)"
+    )
     args = parser.parse_args(argv)
     try:
         if args.command == "grade":
             return grade(args.run_id, args.problems)
+        if args.command == "overhead":
+            return overhead(args.experiment, args.overrides, args.steps, args.warmup)
         return run(args.experiment, args.overrides)
     except UsageError as err:
         print(f"scalelab: error: {err}", file=sys.stderr)

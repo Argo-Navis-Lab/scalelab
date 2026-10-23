@@ -279,7 +279,6 @@ class MismatchCollector(Hook):
     def on_step_end(self, event: StepEndEvent) -> None:
         if self.sums:
             totals = torch.stack(self.sums).sum(dim=0)
-            totals = torch.stack(self.sums).sum(dim=0)
             largest = torch.stack(self.largest).amax(dim=0)
             logp_sum, ratio_sum, logp_max, ratio_max = torch.cat([totals, largest]).tolist()
             measured = {

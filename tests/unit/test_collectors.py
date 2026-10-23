@@ -49,6 +49,7 @@ from scalelab.telemetry.collectors import (
     layers,
     make_collectors,
 )
+from scalelab.telemetry.detectors import SPIKE_METRICS
 from scalelab.telemetry.hooks import (
     BackwardEvent,
     CheckpointEvent,
@@ -380,6 +381,7 @@ def test_a_run_records_every_metric_at_every_step(tmp_path: Path, algo: str, ref
     for step in metrics:
         at_step = {row.metric: row.value for row in rows if row.step == step.step}
         assert at_step.keys() == names
+        assert set(SPIKE_METRICS) <= names | {"policy/kl_ref"}  # m2s33: what it watches
         assert all(math.isfinite(value) for value in at_step.values())
         assert at_step["rollout/reward_mean"] == step.reward  # the same mean of the same rewards
         assert at_step["optim/loss"] == step.loss  # one update a step: its mean is that one

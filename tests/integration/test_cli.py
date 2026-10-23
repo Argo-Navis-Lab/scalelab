@@ -2,6 +2,7 @@
 
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -9,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from scalelab.analysis.reports import gains
 from scalelab.cli import main
 from scalelab.core.envcapture import EnvInfo
 from scalelab.core.registry import Registry
@@ -317,3 +319,36 @@ def test_an_rl_run_keeps_every_grading_problem_by_problem(
         assert kept == rows
         (whole,) = [result for result in grading.greedy if result.name == "arithmetic-2"]
         assert whole.n == 5
+
+
+def test_report_gains_pairs_the_seeds_of_each_rl_experiment(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    warm_start = warm_started(home)
+    assert main(["report", "gains"]) == 2  # only a warm start so far
+    assert "no finished RL run kept its gradings" in capsys.readouterr().err
+    for seed in (0, 1):
+        assert main(["run", str(RL), *SMALL_RL, f"rl.from_run={warm_start}", f"seed={seed}"]) == 0
+    registry = Registry.sqlite(home / "registry.db")
+    runs = [run for run in registry.list_runs() if run.run_id != warm_start]
+    gradings = [load_gradings(home, run.run_id) for run in runs]
+    capsys.readouterr()
+    assert main(["report", "gains"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == f"m1 grpo: experiment {runs[0].config_hash} at {runs[0].git_sha[:8]}" + (
+        ", uncommitted changes" if runs[0].git_dirty else ""
+    )
+    steps = f"{gradings[0][-1].step}, {gradings[1][-1].step}"
+    assert lines[1] == f"  seeds 0, 1; last steps {steps}"
+    rows = [line.split() for line in lines[3:-1]]  # name, n, first, last, ..., verdict
+    expected = gains(gradings)
+    assert [(row[0], int(row[1]), row[-1]) for row in rows] == [
+        (gain.name, gain.n, gain.verdict) for gain in expected
+    ]
+    assert lines[-1] == ""  # and nothing left out
+
+    shutil.rmtree(home / "gradings" / runs[1].run_id)  # as if seed 1 ran before m2s38
+    assert main(["report", "gains"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1] == f"  seeds 0; last steps {gradings[0][-1].step}"
+    assert lines[-1] == "left out 1 of the RL runs: unfinished, or from before m2s38 (no gradings)"

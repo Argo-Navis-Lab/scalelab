@@ -14,6 +14,8 @@ from typing import Any
 
 import torch
 
+from scalelab.analysis.reports import gains
+from scalelab.analysis.stats import Interval
 from scalelab.core import hashing
 from scalelab.core.checkpoint import CheckpointPolicy
 from scalelab.core.config import (
@@ -25,7 +27,13 @@ from scalelab.core.config import (
 )
 from scalelab.core.determinism import MAX_SEED, default_deterministic
 from scalelab.core.envcapture import EnvInfo, capture_env
-from scalelab.core.registry import AnomalyRecord, EvalRecord, OutdatedRegistryError, Registry
+from scalelab.core.registry import (
+    AnomalyRecord,
+    EvalRecord,
+    OutdatedRegistryError,
+    Registry,
+    RunRecord,
+)
 from scalelab.core.storage import atomic_write_bytes, registry_path, scalelab_home
 from scalelab.models.transformer import Transformer
 from scalelab.rl.evaluation import EvalResult, SampledResult
@@ -37,7 +45,7 @@ from scalelab.rl.experiment import (
     run_rl_experiment,
 )
 from scalelab.rl.finished import load_finished_run
-from scalelab.rl.gradings import Grading, gradings_folder, save_grading
+from scalelab.rl.gradings import Grading, gradings_folder, load_gradings, save_grading
 from scalelab.rl.loop import SNAPSHOTS, RLStepMetrics
 from scalelab.rl.overhead import OVERHEAD_BUDGET, measure_overhead
 from scalelab.rl.warmstart_loop import StepMetrics
@@ -440,6 +448,56 @@ def overhead(experiment: Path, overrides: Sequence[str], steps: int, warmup: int
     return 0 if within else EXIT_OVER_BUDGET
 
 
+def points(interval: Interval) -> str:
+    """A difference of two rates and its interval, in percentage points."""
+    low, high = 100 * interval.low, 100 * interval.high
+    return f"{100 * interval.estimate:+.1f} [{low:+.1f}, {high:+.1f}] pp"
+
+
+def report_gains() -> int:
+    """`scalelab report gains`: what RL did to greedy pass@1, from step 0 (the warm start) to
+    the last grading, for each RL experiment and commit whose finished runs kept their
+    gradings (m2s38), its seeds paired problem by problem. Records nothing."""
+    home = scalelab_home()
+    seeds: dict[tuple[str, str], list[RunRecord]] = {}  # (config_hash, git_sha) -> its runs
+    labels: dict[str, str] = {}  # config_hash -> "<model> <algo>"
+    left_out = 0
+    with registry_copy(home) as registry:
+        for run in registry.list_runs():
+            config_json = registry.experiment_json(run.config_hash)
+            assert config_json is not None  # every run row points at an experiment row
+            recorded = json.loads(config_json)  # read raw, as old runs' configs may not load
+            if recorded.get("rl") is None:
+                continue  # a warm start
+            if run.status != "done" or not gradings_folder(home, run.run_id).is_dir():
+                left_out += 1
+                continue
+            labels[run.config_hash] = f"{recorded['model']['name']} {recorded['algo']['name']}"
+            seeds.setdefault((run.config_hash, run.git_sha), []).append(run)
+    if not seeds:
+        raise UsageError("no finished RL run kept its gradings (runs from m2s38 on do)")
+    for (config_hash, git_sha), runs in seeds.items():
+        gradings = [load_gradings(home, run.run_id) for run in runs]
+        dirty = ", uncommitted changes" if any(run.git_dirty for run in runs) else ""
+        print(f"{labels[config_hash]}: experiment {config_hash} at {git_sha[:8]}{dirty}")
+        listed = ", ".join(str(run.seed) for run in runs)
+        steps = ", ".join(str(graded[-1].step) for graded in gradings)
+        print(f"  seeds {listed}; last steps {steps}")
+        print(
+            f"  {'eval set':<16}{'n':>5}{'first':>8}{'last':>8}  "
+            f"{'gain, mean [95% CI]':<26}{'gain, IQM [95% CI]':<26}verdict"
+        )
+        for gain in gains(gradings):
+            print(
+                f"  {gain.name:<16}{gain.n:>5}{gain.first:>8.1%}{gain.last:>8.1%}  "
+                f"{points(gain.mean):<26}{points(gain.iqm):<26}{gain.verdict}"
+            )
+        print()
+    if left_out:
+        print(f"left out {left_out} of the RL runs: unfinished, or from before m2s38 (no gradings)")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scalelab", description="ScaleLab command line.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -466,12 +524,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     overhead_parser.add_argument(
         "--warmup", type=int, default=5, help="steps before the timed ones (default 5)"
     )
+    report_parser = commands.add_parser("report", help="print a report of the recorded runs")
+    report_parser.add_argument(
+        "report", choices=["gains"], help="gains: what RL did to greedy pass@1, over seeds"
+    )
     args = parser.parse_args(argv)
     try:
         if args.command == "grade":
             return grade(args.run_id, args.problems)
         if args.command == "overhead":
             return overhead(args.experiment, args.overrides, args.steps, args.warmup)
+        if args.command == "report":
+            return report_gains()
         return run(args.experiment, args.overrides)
     except UsageError as err:
         print(f"scalelab: error: {err}", file=sys.stderr)

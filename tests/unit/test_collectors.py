@@ -4,9 +4,11 @@ trainer's own, and a real run recording every metric at every step. Also the loo
 order: a step ends before its checkpoint, and the hooks hear of a checkpoint before it is
 saved. Then (m2s30) the detailed collectors: their cadence, the layers, the layer and Adam
 metrics by hand, the steps they skip, and a real run measuring every layer when they are due.
-Then (m2s31) the activation collector: its metrics by hand, the updates it skips, and a run."""
+Then (m2s31) the activation collector: its metrics by hand, the updates it skips, and a run.
+Then (m2s32) the numerics and mismatch collectors by hand, and a sampler that truncates."""
 
 import copy
+import dataclasses
 import math
 from pathlib import Path
 from typing import cast
@@ -24,18 +26,22 @@ from scalelab.rl.flops import StepFlops
 from scalelab.rl.loop import RLStepMetrics, rl_train
 from scalelab.rl.rollout import RolloutBatch, generate
 from scalelab.rl.sampling import log_probs
-from scalelab.rl.trainer import UpdateMetrics, rl_update
+from scalelab.rl.trainer import UpdateMetrics, answer_logprobs, rl_update
 from scalelab.tasks.arithmetic import ArithmeticTask
 from scalelab.tasks.tokenizer import EOS, PAD, encode
 from scalelab.telemetry.collectors import (
     ADAM_METRICS,
     ATTENTION_METRICS,
+    MISMATCH_METRICS,
+    NUMERICS_GROUPS,
     OUTPUT_METRICS,
     STREAM_METRICS,
     ActivationCollector,
     AdamCollector,
     Cadence,
     LayerCollector,
+    MismatchCollector,
+    NumericsCollector,
     OptimizationCollector,
     PolicyCollector,
     RolloutCollector,
@@ -44,6 +50,7 @@ from scalelab.telemetry.collectors import (
     make_collectors,
 )
 from scalelab.telemetry.hooks import (
+    BackwardEvent,
     CheckpointEvent,
     ForwardEvent,
     Hook,
@@ -366,6 +373,8 @@ def test_a_run_records_every_metric_at_every_step(tmp_path: Path, algo: str, ref
         | {f"policy/{name}" for name in ANSWERS | UPDATES | ({"kl_ref"} if reference else set())}
         | {f"optim/{name}" for name in OPTIMIZATION}
         | {f"system/{name}" for name in SYSTEM}
+        | {f"numerics/{group}_{kind}" for group in NUMERICS_GROUPS for kind in ("nan", "inf")}
+        | {f"mismatch/{name}" for name in MISMATCH_METRICS}
     )
     spent = 0
     for step in metrics:
@@ -376,6 +385,8 @@ def test_a_run_records_every_metric_at_every_step(tmp_path: Path, algo: str, ref
         assert at_step["optim/loss"] == step.loss  # one update a step: its mean is that one
         assert at_step["optim/grad_norm"] == step.grad_norm
         assert at_step["optim/grad_clipped"] == (step.grad_norm > 1.0)  # RLConfig's grad_clip
+        assert all(at_step[name] == 0 for name in names if name.startswith("numerics/"))
+        assert at_step["mismatch/logp_max"] < 1e-4  # rounding only: the sampler is the policy
         phases = sum(at_step[f"system/{phase}_s"] for phase in PHASES)
         assert 0 < phases <= at_step["system/step_s"]
         cost = sum(at_step[f"system/{phase}_flops"] for phase in ("sample", "logprobs", "train"))
@@ -669,3 +680,90 @@ def test_a_run_measures_the_activations_on_the_steps_its_cadence_picks(tmp_path:
     )
     assert {(row.step, row.metric, row.layer) for row in rows} == expected  # only step 2
     assert all(math.isfinite(row.value) for row in rows)
+
+
+# --- numerics and mismatch (m2s32) ----------------------------------------------------------
+
+
+def test_the_numerics_counts_by_hand(tmp_path: Path):
+    sink = MetricsSink(tmp_path, "run-a")
+    collector = NumericsCollector(sink)
+    model = make()
+    batch = batch_of(GROUPS)  # 4 rows, the longest 12 tokens
+    logp = torch.zeros(4, 12)
+    logp[0, 7], logp[1, 8], logp[2, 9] = math.nan, -math.inf, math.inf
+    loss = torch.tensor(math.nan)
+    collector.on_forward(dataclasses.replace(forwarded(model, batch), logp=logp, loss=loss))
+    collector.on_forward(forwarded(model, batch))  # another micro-batch, all finite
+    for parameter in model.parameters():
+        parameter.grad = torch.zeros_like(parameter)
+    grad = torch.zeros_like(model.head.weight)
+    grad[0, :3] = math.nan
+    grad[1, 0] = math.inf
+    model.head.weight.grad = grad
+    collector.on_backward(BackwardEvent(step=1, epoch=0, model=model))
+    with torch.no_grad():
+        model.head.weight[2, 0] = -math.inf
+    collector.on_optimizer_step(stepped(model, torch.optim.Adam(model.parameters()), epoch=0))
+    collector.on_step_end(ended(step=1))
+    collector.on_step_end(ended(step=2))  # a step with no update
+    assert found(sink, tmp_path) == {
+        "numerics/logp_nan": 1,
+        "numerics/logp_inf": 2,
+        "numerics/loss_nan": 1,
+        "numerics/loss_inf": 0,
+        "numerics/grads_nan": 3,
+        "numerics/grads_inf": 1,
+        "numerics/weights_nan": 0,
+        "numerics/weights_inf": 1,
+    }
+    assert found(sink, tmp_path, step=2) == {}
+
+
+def test_the_mismatch_by_hand(tmp_path: Path):
+    sink = MetricsSink(tmp_path, "run-a")
+    collector = MismatchCollector(sink)
+    model = make()
+    batch = batch_of(GROUPS)  # answers of 4, 4, 5 and 4 tokens
+    gaps = torch.tensor([0.01, -0.02, 0.03, 0.04])  # the trainer's minus the sampler's, by row
+    trainer = batch.sampler_logprobs + gaps[:, None] * batch.response_mask
+    for start in (0, 2):  # two micro-batches, each cut to its own width
+        part = batch.rows(start, start + 2)
+        old_logp = trainer[start : start + 2, : part.tokens.shape[1]]
+        collector.on_forward(dataclasses.replace(forwarded(model, part), old_logp=old_logp))
+    later = dataclasses.replace(forwarded(model, batch, epoch=1), old_logp=trainer + 1)
+    collector.on_forward(later)  # the second update reads the same tokens again: skipped
+    collector.on_step_end(ended(step=1))
+    collector.on_step_end(ended(step=2))  # a step with no update
+    metrics = found(sink, tmp_path)
+    logp_mean = (4 * 0.01 + 4 * 0.02 + 5 * 0.03 + 4 * 0.04) / 17
+    assert metrics["mismatch/logp_mean"] == pytest.approx(logp_mean, rel=1e-5)
+    assert metrics["mismatch/logp_max"] == pytest.approx(0.04, rel=1e-5)
+    # |e^gap - 1|: a gap below 0 moves the ratio a little less than the same gap above 0.
+    ratios = [math.expm1(0.01), -math.expm1(-0.02), math.expm1(0.03), math.expm1(0.04)]
+    ratio_mean = (4 * ratios[0] + 4 * ratios[1] + 5 * ratios[2] + 4 * ratios[3]) / 17
+    assert metrics["mismatch/ratio_mean"] == pytest.approx(ratio_mean, rel=1e-5)
+    assert metrics["mismatch/ratio_max"] == pytest.approx(math.expm1(0.04), rel=1e-5)
+    assert found(sink, tmp_path, step=2) == {}
+
+
+def test_the_sampler_agrees_with_the_trainer_unless_it_truncates(tmp_path: Path):
+    model = make()
+    drawn = TASK.sample(np.random.default_rng(0), 4, 2)
+    prompts = [TASK.format_prompt(problem) for problem in drawn]
+    metrics: dict[float, dict[str, float]] = {}
+    for top_p in (1.0, 0.8):
+        sink = MetricsSink(tmp_path, f"top-p-{top_p}")
+        collector = MismatchCollector(sink)
+        params = SamplingParams(top_p=top_p)
+        batch = generate(model, prompts, 2, params, torch.Generator().manual_seed(0))
+        with torch.no_grad():
+            old_logp = answer_logprobs(model, batch, temperature=1.0)
+        collector.on_forward(dataclasses.replace(forwarded(model, batch), old_logp=old_logp))
+        collector.on_step_end(ended(step=1))
+        metrics[top_p] = found(sink, tmp_path)
+    assert metrics[1.0]["mismatch/logp_max"] < 1e-5  # rounding only
+    # The untrained model spreads its probability almost evenly, so top_p = 0.8 keeps about
+    # 80% of it, and the sampler's probabilities are the policy's over that: ratios near 0.8.
+    assert 0.1 < metrics[0.8]["mismatch/logp_mean"] < 0.4
+    assert 0.1 < metrics[0.8]["mismatch/ratio_max"] < 0.3

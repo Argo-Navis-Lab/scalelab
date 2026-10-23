@@ -3,6 +3,7 @@ reduces what it is shown to a few numbers where the tensors are (the GPU, on a G
 moves them to the CPU in one go."""
 
 import math
+from collections.abc import Iterable
 from typing import Any, cast
 
 import torch
@@ -194,6 +195,102 @@ class SystemCollector(Hook):
         for name, value in measured.items():
             self.sink.record(event.step, f"system/{name}", value)
         self.written, self.read = 0, 0
+
+
+# m2s32: the groups NumericsCollector counts in, in order. Each group's NaNs and infinities
+# are recorded as "numerics/<group>_nan" and "numerics/<group>_inf".
+NUMERICS_GROUPS = ("logp", "loss", "grads", "weights")
+
+
+def nonfinite(tensors: Iterable[Tensor]) -> Tensor:
+    """(2,) how many entries of `tensors` (all on one device) are NaN, and how many are
+    infinite, of either sign. On that device."""
+    counts = [torch.stack([t.isnan().sum(), t.isinf().sum()]) for t in tensors]
+    return torch.stack(counts).sum(dim=0)
+
+
+class NumericsCollector(Hook):
+    """Every step's broken numbers, counted by tensor group: NaNs and infinities in the
+    trainer's log-probs of the answer tokens and in its losses (every micro-batch of every
+    epoch), in the gradients before clipping and in the weights after each update. Counted
+    each time they are shown, so recorded when the step ends. Any count above 0 is a
+    numerical fault, whatever the algorithm is doing. A step with no update records nothing."""
+
+    def __init__(self, sink: MetricsSink) -> None:
+        self.sink = sink
+        self.counts: dict[str, list[Tensor]] = {group: [] for group in NUMERICS_GROUPS}
+
+    def on_forward(self, event: ForwardEvent) -> None:
+        # Outside the answers the log-probs are 0 (see answer_logprobs): only answers count.
+        self.counts["logp"].append(nonfinite([event.logp]))
+        self.counts["loss"].append(nonfinite([event.loss]))
+
+    def on_backward(self, event: BackwardEvent) -> None:
+        grads = [p.grad for p in event.model.parameters() if p.grad is not None]
+        self.counts["grads"].append(nonfinite(grads))
+
+    def on_optimizer_step(self, event: OptimizerStepEvent) -> None:
+        self.counts["weights"].append(nonfinite(event.model.parameters()))
+
+    def on_step_end(self, event: StepEndEvent) -> None:
+        if self.counts["loss"]:  # the step updated the model
+            totals = torch.stack([torch.stack(parts).sum(dim=0) for parts in self.counts.values()])
+            for group, (nans, infs) in zip(NUMERICS_GROUPS, totals.tolist(), strict=True):
+                self.sink.record(event.step, f"numerics/{group}_nan", nans)
+                self.sink.record(event.step, f"numerics/{group}_inf", infs)
+        self.counts = {group: [] for group in NUMERICS_GROUPS}
+
+
+# m2s32: what MismatchCollector records, in order, each named "mismatch/<name>".
+MISMATCH_METRICS = ("logp_mean", "logp_max", "ratio_mean", "ratio_max")
+
+
+class MismatchCollector(Hook):
+    """Every step's sampler-trainer mismatch, per answer token: how far the log-prob the
+    sampler recorded as it drew the token is from the trainer's, worked out with the same
+    weights before the step's first update. Recorded: the mean and the largest absolute
+    difference, and the same for the ratio they imply (the trainer's probability over the
+    sampler's) minus 1. Over every micro-batch of the first epoch (later epochs read the same
+    tokens again), so recorded when the step ends. A step with no update records nothing.
+
+    The same policy worked out twice should agree, but the sampler reads an answer one token
+    at a time from its cache while the trainer reads it whole, so the rounding differs: a
+    little, in fp32. A sampler that draws from something else, such as top_p < 1, shows as a
+    gap far above that."""
+
+    def __init__(self, sink: MetricsSink) -> None:
+        self.sink = sink
+        self.tokens = 0  # the answer tokens compared
+        self.sums: list[Tensor] = []  # one per micro-batch: the two gaps added up
+        self.largest: list[Tensor] = []  # one per micro-batch: the two gaps' largest
+
+    def on_forward(self, event: ForwardEvent) -> None:
+        if event.epoch > 0:
+            return
+        batch = event.batch
+        # Both are 0 outside the answers, so both gaps are 0 there.
+        diff = event.old_logp - batch.sampler_logprobs.to(event.old_logp.device)
+        logp_gap = diff.abs()
+        ratio_gap = diff.expm1().abs()  # |exp(diff) - 1|, still exact when diff is tiny
+        self.tokens += int(batch.response_mask.sum())  # on the CPU: no wait for the GPU
+        self.sums.append(torch.stack([logp_gap.sum(), ratio_gap.sum()]))
+        self.largest.append(torch.stack([logp_gap.max(), ratio_gap.max()]))
+
+    def on_step_end(self, event: StepEndEvent) -> None:
+        if self.sums:
+            totals = torch.stack(self.sums).sum(dim=0)
+            totals = torch.stack(self.sums).sum(dim=0)
+            largest = torch.stack(self.largest).amax(dim=0)
+            logp_sum, ratio_sum, logp_max, ratio_max = torch.cat([totals, largest]).tolist()
+            measured = {
+                "logp_mean": logp_sum / self.tokens,
+                "logp_max": logp_max,
+                "ratio_mean": ratio_sum / self.tokens,
+                "ratio_max": ratio_max,
+            }
+            for name, value in measured.items():
+                self.sink.record(event.step, f"mismatch/{name}", value)
+        self.tokens, self.sums, self.largest = 0, [], []
 
 
 # m2s30: the detailed collectors (a number per layer) measure every DETAIL_EVERY steps, and
@@ -453,6 +550,8 @@ def make_collectors(
         PolicyCollector(sink, algo),
         OptimizationCollector(sink),
         SystemCollector(sink),
+        NumericsCollector(sink),
+        MismatchCollector(sink),
         LayerCollector(sink, cadence),
         AdamCollector(sink, cadence),
         ActivationCollector(sink, cadence),

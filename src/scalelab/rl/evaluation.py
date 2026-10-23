@@ -18,11 +18,20 @@ from scalelab.tasks.tokenizer import EOS
 
 
 class EvalResult(StrictModel):
-    """One model's greedy pass@1 on one eval set: how many of n problems it solved."""
+    """One model's greedy pass@1 on one eval set: which of its problems it solved. The
+    outcomes, in the order of the problems, are the stored truth (m2s38); the counts come
+    from them."""
 
     name: str  # the eval set, such as "arithmetic-3"
-    n: int
-    passed: int
+    solved: tuple[bool, ...] = Field(min_length=1)  # full marks or not, one per problem
+
+    @property
+    def n(self) -> int:
+        return len(self.solved)
+
+    @property
+    def passed(self) -> int:
+        return sum(self.solved)
 
     @property
     def pass_rate(self) -> float:
@@ -62,13 +71,13 @@ def generate_greedy(
 
 
 def evaluate[P](model: Transformer, task: Task[P], problems: Sequence[P], name: str) -> EvalResult:
-    """Greedy pass@1: how many problems the model's greedy answer gets full marks on."""
+    """Greedy pass@1: which problems the model's greedy answer gets full marks on."""
     completions = generate_greedy(model, [task.format_prompt(p) for p in problems])
-    passed = 0
-    for problem, tokens in zip(problems, completions, strict=True):
-        if task.score(problem, completion_text(tokens)).value == 1.0:
-            passed += 1
-    return EvalResult(name=name, n=len(problems), passed=passed)
+    solved = [
+        task.score(problem, completion_text(tokens)).value == 1.0
+        for problem, tokens in zip(problems, completions, strict=True)
+    ]
+    return EvalResult(name=name, solved=tuple(solved))
 
 
 def evaluate_by[P](
@@ -83,16 +92,22 @@ def evaluate_by[P](
     operation, arithmetic-5 gives "arithmetic-5", then "arithmetic-5/*", "arithmetic-5/+" and
     "arithmetic-5/-" (parts in the sorted order of their labels).
 
-    Each problem is answered once, in its part; the whole set's counts are the parts' counts
-    added up.
+    Each problem is answered once, in its part. The whole set's outcomes are the parts',
+    each put back in its problem's own place: any two gradings of a set line up problem by
+    problem (m2s38).
     """
-    parts: dict[str, list[P]] = defaultdict(list)  # label -> the problems it labels
-    for problem in problems:
-        parts[key(problem)].append(problem)
-    results = [evaluate(model, task, parts[label], f"{name}/{label}") for label in sorted(parts)]
-    n = sum(result.n for result in results)
-    passed = sum(result.passed for result in results)
-    return [EvalResult(name=name, n=n, passed=passed), *results]
+    parts: dict[str, list[int]] = defaultdict(list)  # label -> where its problems are
+    for index, problem in enumerate(problems):
+        parts[key(problem)].append(index)
+    solved = [False] * len(problems)
+    results: list[EvalResult] = []
+    for label in sorted(parts):
+        indexes = parts[label]
+        result = evaluate(model, task, [problems[i] for i in indexes], f"{name}/{label}")
+        for index, outcome in zip(indexes, result.solved, strict=True):
+            solved[index] = outcome  # back to the problem's place in the whole set
+        results.append(result)
+    return [EvalResult(name=name, solved=tuple(solved)), *results]
 
 
 # --- sampled pass@k -------------------------------------------------------------------------

@@ -73,7 +73,7 @@ def test_the_memorized_model_passes_all_four(
 ):
     model, problems = memorized
     result = evaluate(model, TASK, problems, "memorized")
-    assert result == EvalResult(name="memorized", n=4, passed=4)
+    assert result == EvalResult(name="memorized", solved=(True,) * 4)
     assert result.pass_rate == 1.0
     assert result.stderr == 0.0
 
@@ -95,10 +95,10 @@ def test_grades_by_operation_add_up_to_the_whole_set(
     model, problems = memorized  # one "-", two "+" and one "*"
     results = evaluate_by(model, TASK, problems, "memorized", key=lambda p: p.op)
     assert results == [
-        EvalResult(name="memorized", n=4, passed=4),  # the whole set first...
-        EvalResult(name="memorized/*", n=1, passed=1),  # ...then each part, labels sorted
-        EvalResult(name="memorized/+", n=2, passed=2),
-        EvalResult(name="memorized/-", n=1, passed=1),
+        EvalResult(name="memorized", solved=(True,) * 4),  # the whole set first...
+        EvalResult(name="memorized/*", solved=(True,)),  # ...then each part, labels sorted
+        EvalResult(name="memorized/+", solved=(True, True)),
+        EvalResult(name="memorized/-", solved=(True,)),
     ]
     assert results[0] == evaluate(model, TASK, problems, "memorized")
 
@@ -116,9 +116,9 @@ def test_each_part_is_graded_on_its_own_problems(
         key=lambda p: "known" if p in problems else "unseen",
     )
     assert results == [
-        EvalResult(name="mixed", n=10, passed=4),
-        EvalResult(name="mixed/known", n=4, passed=4),
-        EvalResult(name="mixed/unseen", n=6, passed=0),
+        EvalResult(name="mixed", solved=(False,) * 6 + (True,) * 4),  # the set's own order
+        EvalResult(name="mixed/known", solved=(True,) * 4),
+        EvalResult(name="mixed/unseen", solved=(False,) * 6),
     ]
 
 
@@ -160,8 +160,9 @@ def test_standard_error(p: float, n: int, expected: float):
     assert standard_error(p, n) == pytest.approx(expected, abs=1e-4)
 
 
-def test_an_eval_result_derives_its_rate_and_error_from_its_counts():
-    result = EvalResult(name="arithmetic-3", n=1000, passed=250)
+def test_an_eval_result_derives_its_counts_rate_and_error_from_its_outcomes():
+    result = EvalResult(name="arithmetic-3", solved=(True,) * 250 + (False,) * 750)
+    assert (result.n, result.passed) == (1000, 250)
     assert result.pass_rate == 0.25
     assert result.stderr == pytest.approx(0.0137, abs=1e-4)  # sqrt(0.25 * 0.75 / 1000)
 
@@ -217,7 +218,7 @@ def test_a_sampled_result_derives_pass_at_k_from_its_counts():
 
 def test_with_one_sample_it_is_greedy_style_counting():
     sampled = SampledResult(name="x", samples=1, correct=(1,) * 250 + (0,) * 750)
-    greedy = EvalResult(name="x", n=1000, passed=250)
+    greedy = EvalResult(name="x", solved=(True,) * 250 + (False,) * 750)
     assert sampled.pass_at(1) == pytest.approx(greedy.pass_rate)
     assert sampled.stderr(1) == pytest.approx(greedy.stderr)
 

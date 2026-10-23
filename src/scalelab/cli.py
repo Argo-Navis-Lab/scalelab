@@ -37,6 +37,7 @@ from scalelab.rl.experiment import (
     run_rl_experiment,
 )
 from scalelab.rl.finished import load_finished_run
+from scalelab.rl.gradings import Grading, gradings_folder, save_grading
 from scalelab.rl.loop import SNAPSHOTS, RLStepMetrics
 from scalelab.rl.overhead import OVERHEAD_BUDGET, measure_overhead
 from scalelab.rl.warmstart_loop import StepMetrics
@@ -241,6 +242,7 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
         print(f"warm start:    {config.rl.from_run}")
         telemetry = metrics_folder(home, run_id) if runtime.telemetry else "off"  # m2s36
         print(f"metrics:       {telemetry}")
+        print(f"gradings:      {gradings_folder(home, run_id)}")  # m2s38
 
     # Speed is measured between gradings, from the time and the token (or FLOP) count at the
     # last one. A resumed run's count isn't known here, so its first grading shows none.
@@ -265,10 +267,14 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
     def rl_report(
         metrics: RLStepMetrics | None, greedy: list[EvalResult], sampled: list[SampledResult]
     ) -> None:
-        """The same for RL: record the grading (greedy and sampled, whole and by part), and
-        print the whole eval sets' greedy and sampled pass@1. metrics is None at step 0."""
+        """The same for RL: keep the grading problem by problem in its file, record it (greedy
+        and sampled, whole and by part), and print the whole eval sets' greedy and sampled
+        pass@1. metrics is None at step 0."""
         nonlocal last_time, last_flops
-        for record in eval_records(run_id, 0 if metrics is None else metrics.step, greedy, sampled):
+        step = 0 if metrics is None else metrics.step
+        grading = Grading(run_id=run_id, step=step, greedy=tuple(greedy), sampled=tuple(sampled))
+        save_grading(home, grading)  # m2s38: first the outcomes, then the rows that sum them up
+        for record in eval_records(run_id, step, greedy, sampled):
             registry.record_eval(record)
         copy_home()
         by_name = {result.name: result for result in sampled}

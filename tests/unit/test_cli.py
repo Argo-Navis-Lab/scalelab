@@ -88,7 +88,7 @@ def test_rl_speed_and_time_left_come_from_the_flop_budget():
 
 
 def test_a_grading_becomes_greedy_and_sampled_rows():
-    greedy = [EvalResult(name="arithmetic-3", n=4, passed=1)]
+    greedy = [EvalResult(name="arithmetic-3", solved=(False, True, False, False))]
     sampled = [SampledResult(name="arithmetic-3", samples=4, correct=(4, 0, 2, 1))]
     rows = eval_records("run", 7, greedy, sampled)
     assert [(r.step, r.task, r.metric, r.value, r.n) for r in rows] == [
@@ -101,5 +101,5 @@ def test_a_grading_becomes_greedy_and_sampled_rows():
 
 
 def test_a_warm_start_grading_has_greedy_rows_only():
-    rows = eval_records("run", 3, [EvalResult(name="arithmetic-2", n=10, passed=5)])
+    rows = eval_records("run", 3, [EvalResult(name="arithmetic-2", solved=(True, False) * 5)])
     assert [r.metric for r in rows] == ["greedy_pass@1"]

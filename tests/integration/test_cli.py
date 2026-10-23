@@ -12,6 +12,7 @@ import pytest
 from scalelab.cli import main
 from scalelab.core.envcapture import EnvInfo
 from scalelab.core.registry import Registry
+from scalelab.rl.gradings import load_gradings
 from scalelab.telemetry.sink import read_metrics
 
 HELLO = Path(__file__).resolve().parents[2] / "configs" / "experiments" / "hello.yaml"
@@ -289,3 +290,30 @@ def test_overhead_times_the_steps_without_and_with_telemetry_and_records_nothing
     assert code == (0 if "within the 5% budget" in output else 1)
     assert sorted(home.rglob("*")) == before  # no metrics, no checkpoints, no runs
     assert (home / "registry.db").read_bytes() == registry
+
+
+# --- added in m2s38: gradings kept problem by problem ---------------------------------------
+
+
+def test_an_rl_run_keeps_every_grading_problem_by_problem(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    warm_start = warm_started(home)
+    assert main(["run", str(RL), *SMALL_RL, f"rl.from_run={warm_start}"]) == 0
+    output = capsys.readouterr().out
+    registry = Registry.sqlite(home / "registry.db")
+    (rl,) = [run for run in registry.list_runs() if run.run_id != warm_start]
+    assert f"gradings:      {home / 'gradings' / rl.run_id}" in output
+    steps = int(re.findall(r"done: ran (\d+) steps", output)[-1])
+    gradings = load_gradings(home, rl.run_id)
+    assert [grading.step for grading in gradings] == list(range(steps + 1))
+    graded = registry.list_evals(rl.run_id)
+    for grading in gradings:  # each row of the evals table sums up one result in the files
+        rows = {(e.task, e.metric): e.value for e in graded if e.step == grading.step}
+        kept = {(result.name, "greedy_pass@1"): result.pass_rate for result in grading.greedy}
+        for result in grading.sampled:
+            kept[(result.name, "sampled_pass@1")] = result.pass_at(1)
+            kept[(result.name, "sampled_pass@4")] = result.pass_at(4)
+        assert kept == rows
+        (whole,) = [result for result in grading.greedy if result.name == "arithmetic-2"]
+        assert whole.n == 5

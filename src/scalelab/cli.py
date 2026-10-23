@@ -1,6 +1,7 @@
 """The `scalelab` command."""
 
 import argparse
+import json
 import shutil
 import signal
 import sys
@@ -17,7 +18,7 @@ from scalelab.core.checkpoint import CheckpointPolicy
 from scalelab.core.config import ModelConfig, RuntimeConfig, load_config, parse_override
 from scalelab.core.determinism import MAX_SEED, default_deterministic
 from scalelab.core.envcapture import EnvInfo, capture_env
-from scalelab.core.registry import EvalRecord, OutdatedRegistryError, Registry
+from scalelab.core.registry import AnomalyRecord, EvalRecord, OutdatedRegistryError, Registry
 from scalelab.core.storage import atomic_write_bytes, registry_path, scalelab_home
 from scalelab.models.transformer import Transformer
 from scalelab.rl.evaluation import EvalResult, SampledResult
@@ -29,12 +30,14 @@ from scalelab.rl.experiment import (
     run_rl_experiment,
 )
 from scalelab.rl.finished import load_finished_run
-from scalelab.rl.loop import RLStepMetrics
+from scalelab.rl.loop import SNAPSHOTS, RLStepMetrics
 from scalelab.rl.warmstart_loop import StepMetrics
+from scalelab.telemetry.anomalies import AnomalyEvent, RunHalted
 from scalelab.telemetry.sink import MetricsSink, metrics_folder
 
 EXIT_USAGE = 2  # the command line asked for something impossible
 EXIT_INTERRUPTED = 130  # stopped early with a checkpoint saved; run again to resume
+EXIT_HALTED = 1  # m2s35: a detector's HALT stopped the run, recorded failed (as a crash is)
 METRIC = "greedy_pass@1"  # the greedy grade's name in the evals table
 SAMPLED_KS = (1, 4)  # RL's sampled grades: pass@1, and pass@4 (how often 4 tries find it)
 
@@ -252,6 +255,22 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
             print(f"step {metrics.step:,}: reward {metrics.reward:.3f}  {rates}{pace}")
         last_time = now
 
+    def record_anomaly(event: AnomalyEvent) -> None:
+        """Record one event of the online detectors, and say what was found."""
+        registry.record_anomaly(
+            AnomalyRecord(
+                run_id=run_id,
+                step=event.step,
+                detector=event.detector,
+                metric=event.metric,
+                severity=event.severity,
+                signature_json=json.dumps(event.window_metrics, sort_keys=True),
+            )
+        )
+        copy_home()
+        numbers = "  ".join(f"{name} {value:.4g}" for name, value in event.window_metrics.items())
+        print(f"step {event.step}: {event.severity} {event.detector} in {event.metric}: {numbers}")
+
     policy = CheckpointPolicy(every_steps=runtime.checkpoint_every)
     previous_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
     policy.stop_on_signals()  # from here on, Ctrl+C and SIGTERM mean "save and stop"
@@ -273,8 +292,23 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
             else:
                 sink = MetricsSink(home, run_id)  # what the collectors measure goes here
                 metrics = run_rl_experiment(
-                    config, seed, start, checkpoints, home, policy, deterministic, rl_report, sink
+                    config,
+                    seed,
+                    start,
+                    checkpoints,
+                    home,
+                    policy,
+                    deterministic,
+                    rl_report,
+                    sink,
+                    record_anomaly,
                 )
+        except RunHalted as halted:
+            registry.finish_run(run_id, "failed")
+            snapshots = home / "checkpoints" / run_id / SNAPSHOTS
+            print(f"halted at {halted}; the step's state is in {snapshots}")
+            print("run the same command again to retry from the last checkpoint")
+            return EXIT_HALTED
         except Exception:
             registry.finish_run(run_id, "failed")
             raise

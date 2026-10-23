@@ -1,4 +1,5 @@
-"""Run registry: one database row per experiment and per run, and one per eval result."""
+"""Run registry: one database row per experiment and per run, one per eval result and one per
+anomaly event."""
 
 from datetime import UTC, datetime
 from pathlib import Path
@@ -82,6 +83,18 @@ evals = Table(
     Column("stderr", Float, nullable=False),
 )
 
+anomalies = Table(  # m2s35
+    "anomalies",
+    metadata,
+    Column("run_id", String, ForeignKey("runs.run_id"), primary_key=True),
+    Column("step", Integer, primary_key=True),  # where the finding started
+    Column("detector", String, primary_key=True),  # "spike", "divergence" or "collapse"
+    Column("metric", String, primary_key=True),  # what it watched, such as "optim/grad_norm"
+    Column("severity", String, nullable=False),  # "WARN", "SNAPSHOT" or "HALT"
+    Column("signature_json", Text, nullable=False),  # the numbers it judged by, as JSON
+    Column("label", String),  # what really happened, once known (M5's fault library)
+)
+
 
 class RunRecord(StrictModel):
     """One row of the runs table, as a typed Python object."""
@@ -110,6 +123,18 @@ class EvalRecord(StrictModel):
     value: float
     n: int
     stderr: float
+
+
+class AnomalyRecord(StrictModel):
+    """One row of the anomalies table: one event of a run's online detectors."""
+
+    run_id: str
+    step: int
+    detector: str
+    metric: str
+    severity: str
+    signature_json: str
+    label: str | None = None
 
 
 class OutdatedRegistryError(Exception):
@@ -283,6 +308,30 @@ class Registry:
         )
         with self.engine.connect() as conn:
             return [EvalRecord.model_validate(dict(row)) for row in conn.execute(query).mappings()]
+
+    def record_anomaly(self, record: AnomalyRecord) -> None:
+        """Store one anomaly event, replacing any stored for the same run, step, detector and
+        metric: a resumed run redoes the steps after its last checkpoint, detectors included."""
+        same = (
+            (anomalies.c.run_id == record.run_id)
+            & (anomalies.c.step == record.step)
+            & (anomalies.c.detector == record.detector)
+            & (anomalies.c.metric == record.metric)
+        )
+        with self.engine.begin() as conn:
+            conn.execute(delete(anomalies).where(same))
+            conn.execute(insert(anomalies).values(**record.model_dump()))
+
+    def list_anomalies(self, run_id: str) -> list[AnomalyRecord]:
+        """A run's anomaly events, in order of step, then detector, then metric."""
+        query = (
+            select(anomalies)
+            .where(anomalies.c.run_id == run_id)
+            .order_by(anomalies.c.step, anomalies.c.detector, anomalies.c.metric)
+        )
+        with self.engine.connect() as conn:
+            rows = conn.execute(query).mappings()
+            return [AnomalyRecord.model_validate(dict(row)) for row in rows]
 
     def get_run(self, run_id: str) -> RunRecord | None:
         with self.engine.connect() as conn:

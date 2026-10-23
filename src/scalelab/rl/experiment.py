@@ -27,7 +27,8 @@ from scalelab.tasks.arithmetic import ArithmeticProblem, ArithmeticTask
 from scalelab.tasks.base import Task
 from scalelab.tasks.countdown import CountdownProblem, CountdownTask
 from scalelab.tasks.evalsets import EVAL_SETS, eval_set_name, read_eval_set
-from scalelab.telemetry.collectors import make_collectors
+from scalelab.telemetry.anomalies import AnomalyEvent, AnomalyMonitor, ignore
+from scalelab.telemetry.collectors import Cadence, make_collectors
 from scalelab.telemetry.hooks import Hook
 from scalelab.telemetry.sink import MetricsSink
 
@@ -155,6 +156,7 @@ def run_rl_experiment(
     deterministic: bool | None = None,
     report: RLReport | None = None,
     sink: MetricsSink | None = None,
+    on_anomaly: Callable[[AnomalyEvent], None] = ignore,
 ) -> list[RLStepMetrics]:
     """RL on the config's task, starting from `start`: the model rl.from_run ended with,
     which is also the KL penalty's reference (a copy is kept; `start` itself is trained).
@@ -165,7 +167,8 @@ def run_rl_experiment(
     a `report`, the model is graded before the first step (step 0: the warm start's own
     grade, R_0), every config.eval.every steps and after the last one. Grading changes
     nothing about training, and its FLOPs aren't part of the budget. With a `sink`, every
-    collector measures every step and records it there (telemetry).
+    collector measures every step and records it there (telemetry), and the online
+    detectors judge what they measured: each event goes to `on_anomaly`.
     """
     if config.algo is None or config.rl is None:
         raise ValueError(f"{config.name} is not an RL experiment: it has no algo and rl sections")
@@ -181,8 +184,11 @@ def run_rl_experiment(
     task, problem_type = make_task(config.task.name, config.task.ops)
     eval_sets = load_eval_sets(task, problem_type, config.task.difficulties, config.eval.problems)
     hooks: list[Hook] = []
+    monitor: AnomalyMonitor | None = None
     if sink is not None:
-        hooks = [*make_collectors(sink, algo), sink]  # the sink last: it writes what they record
+        cadence = Cadence()  # m2s35: the detectors' events make the detailed collectors measure
+        hooks = [*make_collectors(sink, algo, cadence), sink]  # the sink last: it writes them
+        monitor = AnomalyMonitor(sink, cadence, on_anomaly)
 
     def grade(metrics: RLStepMetrics | None) -> None:
         if report is None:
@@ -211,4 +217,5 @@ def run_rl_experiment(
         eval_prompts(task, problem_type),
         on_step=grade,
         hooks=hooks,
+        monitor=monitor,
     )

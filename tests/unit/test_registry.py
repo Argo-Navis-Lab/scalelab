@@ -19,6 +19,7 @@ from scalelab.core.envcapture import (
 )
 from scalelab.core.hashing import canonical_json, config_hash
 from scalelab.core.registry import (
+    AnomalyRecord,
     EvalRecord,
     OutdatedRegistryError,
     Registry,
@@ -56,7 +57,8 @@ def test_creates_file_and_tables(tmp_path):
     path = tmp_path / "sub" / "registry.db"  # the folder doesn't exist yet either
     registry = Registry.sqlite(path)
     assert path.is_file()
-    assert sorted(inspect(registry.engine).get_table_names()) == ["evals", "experiments", "runs"]
+    tables = ["anomalies", "evals", "experiments", "runs"]
+    assert sorted(inspect(registry.engine).get_table_names()) == tables
 
 
 def test_rows_survive_reopening_the_file(tmp_path, config, env):
@@ -293,3 +295,42 @@ def test_a_registry_from_before_evals_gains_the_table(
     reopened = Registry.sqlite(path)
     assert reopened.get_run(run_id) is not None  # the old rows are untouched...
     assert reopened.list_evals(run_id) == []  # ...and the new table is there, empty
+
+
+# --- added in m2s35: anomaly events -----------------------------------------------------------
+
+
+def spike(run_id: str, step: int, z: float) -> AnomalyRecord:
+    """A spike in the loss, for the tests to store."""
+    return AnomalyRecord(
+        run_id=run_id,
+        step=step,
+        detector="spike",
+        metric="optim/loss",
+        severity="WARN",
+        signature_json=f'{{"z": {z}}}',
+    )
+
+
+def test_anomalies_come_back_in_order_and_a_redone_step_replaces_its_event(
+    registry: Registry, config: ExperimentConfig, env: EnvInfo
+):
+    run_id = registry.add_run(config, seed=0, env=env)
+    registry.record_anomaly(spike(run_id, step=300, z=7.5))
+    registry.record_anomaly(spike(run_id, step=120, z=6.5))
+    registry.record_anomaly(spike(run_id, step=120, z=8.0))  # a resumed run redid step 120
+    found = registry.list_anomalies(run_id)
+    assert [(a.step, a.signature_json) for a in found] == [(120, '{"z": 8.0}'), (300, '{"z": 7.5}')]
+    assert found[0].label is None  # until M5 says what it was
+
+
+def test_a_registry_from_before_anomalies_gains_the_table(
+    tmp_path: Path, config: ExperimentConfig, env: EnvInfo
+):
+    path = tmp_path / "registry.db"
+    run_id = Registry.sqlite(path).add_run(config, seed=0, env=env)
+    with Registry.sqlite(path).engine.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE anomalies")  # now it looks like a step 34 registry
+    reopened = Registry.sqlite(path)
+    assert reopened.get_run(run_id) is not None
+    assert reopened.list_anomalies(run_id) == []

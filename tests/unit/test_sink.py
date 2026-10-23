@@ -130,3 +130,18 @@ def test_a_real_run_writes_its_metrics_at_every_checkpoint(tmp_path: Path):
     assert steps == [[1, 2], [3, 4], [5]]  # one part per checkpoint
     rows = read_metrics(tmp_path, "run-a")
     assert [r.value for r in rows] == [m.reward for m in metrics]
+
+
+# --- added in m2s35: each step's values, for the detectors ------------------------------------
+
+
+def test_values_are_the_newest_steps_metrics_with_no_layer(tmp_path: Path):
+    sink = MetricsSink(tmp_path, "run")
+    sink.record(1, "optim/loss", 0.5)
+    sink.record(2, "optim/loss", 0.25)
+    sink.record(2, "optim/layer_grad_norm", 3.0, layer=1)
+    sink.flush()  # writing the rows keeps the values
+    sink.record(2, "policy/entropy", 0.75)
+    assert sink.values(2) == {"optim/loss": 0.25, "policy/entropy": 0.75}
+    assert sink.values(1) == {}  # an older step's are gone
+    assert sink.values(3) == {}

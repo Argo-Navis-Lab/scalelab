@@ -27,10 +27,12 @@ from scalelab.rl.scoring import reward_values, score_rollouts
 from scalelab.rl.trainer import UpdateMetrics, rl_update
 from scalelab.rl.warmstart_loop import make_optimizer
 from scalelab.tasks.base import Task
+from scalelab.telemetry.anomalies import AnomalyMonitor, RunHalted
 from scalelab.telemetry.hooks import CheckpointEvent, Hook, RolloutEvent, StepEndEvent
 from scalelab.telemetry.timing import StepTimer
 
 GENERATION_BATCH = 512  # answers decoded at once: a whole step of 64 problems x 8 answers
+SNAPSHOTS = "snapshots"  # m2s35: the forensic checkpoints' folder, inside the checkpoint folder
 
 
 class RLStepMetrics(StrictModel):
@@ -87,6 +89,7 @@ def rl_train[P](
     stop_after: int | None = None,
     on_step: Callable[[RLStepMetrics], None] | None = None,
     hooks: Sequence[Hook] = (),
+    monitor: AnomalyMonitor | None = None,
 ) -> list[RLStepMetrics]:
     """Train `model` with RL until config.flops FLOPs have been spent (or config.max_steps
     steps taken), resuming from the latest checkpoint in `checkpoint_dir` if there is one.
@@ -105,6 +108,10 @@ def rl_train[P](
     timed for on_step_end: data (drawing problems: the data-wait time), generate, score,
     then with an update logprobs (preparing it, and the old and reference log-probs) and
     train.
+
+    A `monitor` judges each step once on_step_end is over. An event of severity SNAPSHOT or
+    HALT saves the step's state in the SNAPSHOTS folder inside `checkpoint_dir`, which
+    pruning leaves alone; HALT then raises RunHalted. Checkpoints keep the monitor's state.
     """
     policy = policy or CheckpointPolicy()
     optimizer = make_optimizer(model, config)
@@ -121,6 +128,24 @@ def rl_train[P](
         generator.set_state(state["sampling"])
         restore_rng(state["rng"])
         flops = state["flops"]
+        if monitor is not None and state.get("anomalies") is not None:  # m2s35
+            monitor.load_state(state["anomalies"])
+
+    def save(directory: str | Path) -> None:
+        """Save the run's state as of the step just taken in `directory`, hooks told first."""
+        saving = CheckpointEvent(step=step)
+        for hook in hooks:
+            hook.on_checkpoint(saving)  # before saving: see CheckpointEvent
+        state = {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "data_rng": data_rng.bit_generator.state,
+            "sampling": generator.get_state(),
+            "rng": capture_rng(),
+            "flops": flops,
+            "anomalies": None if monitor is None else monitor.state(),  # m2s35
+        }
+        save_checkpoint(directory, step, state, home)
 
     metrics: list[RLStepMetrics] = []
     timer = StepTimer(model.embed.weight.device)
@@ -201,23 +226,20 @@ def rl_train[P](
         )
         for hook in hooks:
             hook.on_step_end(ended)
+
+        events = monitor.check(step) if monitor is not None else []  # m2s35
+
         if on_step is not None:
             on_step(metrics[-1])
         if step == stop_after:
             policy.request_stop()
+        if any(event.severity != "WARN" for event in events):  # m2s35: SNAPSHOT or HALT
+            save(Path(checkpoint_dir) / SNAPSHOTS)
+        halts = [event for event in events if event.severity == "HALT"]
+        if halts:
+            raise RunHalted(halts[0])
         if budget_spent(config, step, flops) or policy.due(step):
-            saving = CheckpointEvent(step=step)
-            for hook in hooks:
-                hook.on_checkpoint(saving)  # before saving: see CheckpointEvent
-            state = {
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "data_rng": data_rng.bit_generator.state,
-                "sampling": generator.get_state(),
-                "rng": capture_rng(),
-                "flops": flops,
-            }
-            save_checkpoint(checkpoint_dir, step, state, home)
+            save(checkpoint_dir)
             prune_checkpoints(checkpoint_dir, policy.keep, home)
             policy.saved()
             if policy.stop_requested:

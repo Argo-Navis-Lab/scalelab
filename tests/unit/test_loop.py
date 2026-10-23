@@ -9,13 +9,17 @@ import pytest
 import torch
 import yaml
 
+from scalelab.core.checkpoint import CheckpointPolicy, latest_checkpoint, load_checkpoint
 from scalelab.core.config import AlgoConfig, ModelConfig, RLConfig
 from scalelab.core.determinism import seed_everything
 from scalelab.models.transformer import Transformer
-from scalelab.rl.loop import RLStepMetrics, rl_train, sample_problems
+from scalelab.rl.loop import SNAPSHOTS, RLStepMetrics, rl_train, sample_problems
 from scalelab.rl.warmstart import eval_prompts, sample_examples
 from scalelab.tasks.arithmetic import ArithmeticProblem, ArithmeticTask
 from scalelab.tasks.rewards import Reward
+from scalelab.telemetry.anomalies import AnomalyEvent, AnomalyMonitor, RunHalted, Severity
+from scalelab.telemetry.collectors import Cadence
+from scalelab.telemetry.sink import MetricsSink
 
 ALGOS = Path(__file__).resolve().parents[2] / "configs" / "algos"
 TINY = ModelConfig(name="tiny", n_layers=2, d_model=64, n_heads=1, context=32)
@@ -180,3 +184,77 @@ def test_max_steps_ends_a_run_before_its_budget(tmp_path: Path):
     assert metrics[-1].flops < 1e15  # most of the budget is left
     assert (tmp_path / "ckpt" / "step-000000003.json").exists()  # the last step is saved
     assert session() == []  # and the run counts as finished
+
+
+# --- added in m2s35: the loop honors the detectors' events ----------------------------------
+
+
+class Scripted(AnomalyMonitor):
+    """A monitor that finds one thing, at step 2, of the given severity."""
+
+    def __init__(self, home: Path, severity: Severity) -> None:
+        super().__init__(MetricsSink(home, "run"), Cadence())
+        self.severity: Severity = severity
+
+    def check(self, step: int) -> list[AnomalyEvent]:
+        if step != 2:
+            return []
+        return [AnomalyEvent(step, "divergence", "optim/grad_norm", self.severity, {"value": 1.0})]
+
+
+def watched(
+    home: Path, monitor: AnomalyMonitor, steps: int = 3, policy: CheckpointPolicy | None = None
+) -> list[RLStepMetrics]:
+    """`steps` steps of RL from an untrained tiny model, seed 0, judged by `monitor`."""
+    seeds = seed_everything(0, deterministic=True)
+    return rl_train(
+        Transformer(TINY),
+        Hurry(),
+        [2],
+        preset("rloo"),
+        RLConfig.model_validate(SETTINGS | {"flops": 1e15, "max_steps": steps}),
+        np.random.default_rng(seeds.data),
+        torch.Generator().manual_seed(seeds.sampling),
+        home / "ckpt",
+        home,
+        policy,
+        monitor=monitor,
+    )
+
+
+def snapshots(home: Path) -> list[str]:
+    return [path.name for path in sorted((home / "ckpt" / SNAPSHOTS).glob("step-*.json"))]
+
+
+def test_a_warning_saves_nothing_more(tmp_path: Path):
+    assert len(watched(tmp_path, Scripted(tmp_path, "WARN"))) == 3
+    assert snapshots(tmp_path) == []
+
+
+def test_a_snapshot_is_kept_and_the_run_goes_on(tmp_path: Path):
+    policy = CheckpointPolicy(every_steps=1, keep=1)  # steps 1 and 2 are saved, then pruned
+    assert len(watched(tmp_path, Scripted(tmp_path, "SNAPSHOT"), policy=policy)) == 3
+    assert snapshots(tmp_path) == ["step-000000002.json"]
+    latest = latest_checkpoint(tmp_path / "ckpt")
+    assert latest is not None and latest.name == "step-000000003.json"
+    step, _ = load_checkpoint(tmp_path / "ckpt" / SNAPSHOTS / "step-000000002.json", tmp_path)
+    assert step == 2  # its tensors outlived the pruning of the step 2 checkpoint
+
+
+def test_a_halt_saves_the_step_then_stops_the_run(tmp_path: Path):
+    with pytest.raises(RunHalted, match="step 2: divergence in optim/grad_norm"):
+        watched(tmp_path, Scripted(tmp_path, "HALT"))
+    assert snapshots(tmp_path) == ["step-000000002.json"]
+    assert latest_checkpoint(tmp_path / "ckpt") is None  # a rerun starts from the last good one
+
+
+def test_a_resumed_run_carries_on_with_the_monitors_state(tmp_path: Path):
+    first = AnomalyMonitor(MetricsSink(tmp_path, "run"), Cadence())
+    first.cadence.alert(49)  # as if a detector had fired: every step measured up to step 99
+    watched(tmp_path, first, steps=2)
+    latest = latest_checkpoint(tmp_path / "ckpt")
+    assert latest is not None
+    assert load_checkpoint(latest, tmp_path)[1]["anomalies"] == first.state()
+    second = AnomalyMonitor(MetricsSink(tmp_path, "run"), Cadence())
+    assert len(watched(tmp_path, second, steps=3)) == 1  # resumed after step 2
+    assert second.cadence.until == 99

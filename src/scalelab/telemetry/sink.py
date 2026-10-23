@@ -62,12 +62,23 @@ class MetricsSink(Hook):
         self.rows: list[MetricRow] = []
         self.parts = len(list(self.folder.glob("part-*.parquet")))  # by any earlier session
         self.last_write = clock()
+        self.latest: dict[str, float] = {}  # m2s35: the newest step's metrics with no layer
+        self.latest_step = 0
 
     def record(self, step: int, metric: str, value: float, layer: int | None = None) -> None:
         """Keep one measurement, and write the rows kept so far if it is time to."""
         self.rows.append(MetricRow(self.run_id, step, time.time(), metric, layer, float(value)))
+        if layer is None:  # m2s35: kept for the detectors too
+            if step != self.latest_step:
+                self.latest, self.latest_step = {}, step
+            self.latest[metric] = float(value)
         if self.clock() - self.last_write >= self.every_seconds:
             self.flush()
+
+    def values(self, step: int) -> dict[str, float]:
+        """The metrics with no layer recorded at `step`, if it is the newest step recorded
+        (what the detectors judge, m2s35); none otherwise. Unlike the rows, a write keeps them."""
+        return dict(self.latest) if step == self.latest_step else {}
 
     def flush(self) -> None:
         """Write the rows kept so far as the next part file (no file if there are none)."""

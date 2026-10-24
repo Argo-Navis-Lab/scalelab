@@ -12,12 +12,14 @@ import pyarrow.parquet as pq
 import torch
 
 from scalelab.bench.attention import attention_cases, bench_attention
-from scalelab.bench.decode import DecodeCase, bench_decode, decode_cases
+from scalelab.bench.decode import DecodeCase, StepMeasurement, bench_decode, decode_cases
 from scalelab.bench.elementwise import COPY_SIZES, bench_copy, bench_elementwise, elementwise_cases
 from scalelab.bench.gemm import bench_gemm, gemm_shapes
+from scalelab.bench.timing import Measurement
 from scalelab.core.config import ModelConfig, StrictModel
 from scalelab.core.envcapture import EnvInfo
 from scalelab.core.storage import atomic_write_bytes
+from scalelab.costmodel.calibrate import Sample, env_versions
 from scalelab.costmodel.memory import max_generation_batch
 from scalelab.costmodel.ops import VALUE_BYTES
 from scalelab.costmodel.specs import HardwareSpec, ModelSpec
@@ -88,3 +90,27 @@ def load_env(path: Path) -> EnvInfo:
     """Where a suite's results were measured: the commit, the versions, the machine."""
     metadata = pq.read_schema(path).metadata or {}
     return EnvInfo.model_validate_json(metadata[ENV_KEY])
+
+
+def load_samples(folder: Path) -> tuple[list[Sample], dict[str, str]]:
+    """Every suite's results in a device's folder as calibration samples (a whole decode step
+    is one sample of all its ops), and the versions they were measured with."""
+    samples: list[Sample] = []
+    found: dict[Suite, dict[str, str]] = {}
+    for suite in SUITES:
+        path = folder / f"{suite}.parquet"
+        if not path.exists():
+            continue
+        found[suite] = env_versions(load_env(path))
+        if suite == "decode":
+            steps = load_results(path, StepMeasurement)
+            samples += [Sample(suite, step.ops, step.seconds) for step in steps]
+        else:
+            results = load_results(path, Measurement)
+            samples += [Sample(suite, [result.op], result.seconds) for result in results]
+    if not found:
+        raise FileNotFoundError(f"no benchmark results in {folder}")
+    versions = next(iter(found.values()))
+    if any(other != versions for other in found.values()):
+        raise ValueError(f"the suites ran on different versions, so fit them apart: {found}")
+    return samples, versions

@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from scalelab.bench.attention import LENGTHS, attention_cases
 from scalelab.bench.decode import StepMeasurement, decode_cases
 from scalelab.bench.elementwise import COPY_SIZES, copy_op, elementwise_cases
@@ -12,12 +14,14 @@ from scalelab.bench.suites import (
     decode_fits,
     load_env,
     load_results,
+    load_samples,
     plan_suite,
     save_results,
 )
 from scalelab.bench.timing import Measurement, Timing
 from scalelab.core.config import load_config
 from scalelab.core.envcapture import capture_env
+from scalelab.costmodel.calibrate import Sample, env_versions
 from scalelab.costmodel.specs import HARDWARE, ModelSpec, WorkloadSpec
 
 HELLO = Path(__file__).resolve().parents[2] / "configs" / "experiments" / "hello.yaml"
@@ -73,3 +77,24 @@ def test_results_round_trip_through_parquet(tmp_path: Path) -> None:
     assert load_results(folder / "copy.parquet", Measurement) == measurements
     assert load_results(folder / "decode.parquet", StepMeasurement) == steps
     assert load_env(folder / "decode.parquet") == env
+
+
+def test_samples_come_from_every_suite_saved(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        load_samples(tmp_path)
+    copies = [Measurement(op=copy_op(4096), timing=Timing(number=40, samples=(2e-6,)))]
+    workload = WorkloadSpec(phase="decode", batch=8, tokens=1, past=63)
+    timing = Timing(number=2, samples=(7.1e-4, 7.3e-4, 7e-4))
+    step = StepMeasurement(
+        model="m1", spec=ModelSpec.from_config(LADDER[0]), workload=workload, timing=timing
+    )
+    env = capture_env()
+    save_results(tmp_path / "copy.parquet", copies, env)
+    save_results(tmp_path / "decode.parquet", [step], env)
+    samples, versions = load_samples(tmp_path)
+    assert samples == [Sample("copy", [copy_op(4096)], 2e-6), Sample("decode", step.ops, 7.1e-4)]
+    assert versions == env_versions(env)
+    newer = env.software.model_copy(update={"packages": {"torch": "9.9.9"}})
+    save_results(tmp_path / "copy.parquet", copies, env.model_copy(update={"software": newer}))
+    with pytest.raises(ValueError, match="different versions"):
+        load_samples(tmp_path)

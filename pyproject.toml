@@ -10,6 +10,7 @@ dependencies = [
     "pydantic>=2.14.1",
     "pyyaml>=6.0.3",
     "safetensors>=0.8.0",
+    "scipy>=1.18.1",
     "sqlalchemy>=2.1.5",
     "torch>=2.14.1",
 ]
@@ -30,6 +31,7 @@ dev = [
     "pyright[nodejs]>=1.1.414",
     "pytest>=9.1.1",
     "ruff>=0.17.1",
+    "scipy-stubs>=1.18.1.1",
     "types-pyyaml>=6.0.12.20260906",
 ]
 

@@ -33,6 +33,55 @@ class Efficiency(StrictModel):
 IDEAL = Efficiency()  # the datasheet's peaks, reached exactly, and launches for free
 
 
+# The efficiency an op is timed with (m3s7): its class's, except that elementwise ops differ
+# too much to share one (an RMSNorm runs several kernels, a copy one), so they go by kind.
+Group = Literal[
+    "gemm",
+    "gemv-decode",
+    "attention",
+    "copy",
+    "norm",
+    "norm.grad",
+    "rope",
+    "rope.grad",
+    "act",
+    "act.grad",
+    "residual",
+]
+# Each elementwise kind under the names op_graph gives it and the benchmarks' first words.
+KINDS: dict[str, Group] = {
+    "copy": "copy",
+    "embed": "copy",
+    "attn.cache": "copy",
+    "norm": "norm",
+    "attn_norm": "norm",
+    "attn.q_norm": "norm",
+    "attn.k_norm": "norm",
+    "mlp_norm": "norm",
+    "rope": "rope",
+    "attn.q_rope": "rope",
+    "attn.k_rope": "rope",
+    "swiglu": "act",
+    "gelu": "act",
+    "mlp.act": "act",
+    "residual": "residual",
+    "attn_residual": "residual",
+    "mlp_residual": "residual",
+}
+# Backward kernels unlike their forward ones get an efficiency of their own. A residual add's
+# gradient is an add like the forward; the embedding's is a scatter, about a copy.
+BACKWARD: dict[Group, Group] = {"norm": "norm.grad", "rope": "rope.grad", "act": "act.grad"}
+
+
+def group(op: Op) -> Group:
+    """Which efficiency times this op: its class, or for an elementwise op its kind."""
+    if op.op_class != "elementwise":
+        return op.op_class
+    forward = op.name.removesuffix(".grad")
+    kind = KINDS[forward.split(" ")[0]]  # "attn_norm", or a benchmark's "norm 1024x128"
+    return BACKWARD.get(kind, kind) if forward != op.name else kind
+
+
 class OpTime(StrictModel):
     """One op's time on a device, term by term."""
 
@@ -124,11 +173,11 @@ def _bottleneck(times: Iterable[OpTime]) -> Bound:
 def time_ops(
     ops: Iterable[Op],
     hardware: HardwareSpec,
-    efficiencies: Mapping[OpClass, Efficiency] | None = None,
+    efficiencies: Mapping[Group, Efficiency] | None = None,
 ) -> Prediction:
-    """Times every op with its class's efficiency (all ideal when there are none yet)."""
+    """Times every op with its group's efficiency (all ideal when there are none yet)."""
     times = tuple(
-        op_time(op, hardware, IDEAL if efficiencies is None else efficiencies[op.op_class])
+        op_time(op, hardware, IDEAL if efficiencies is None else efficiencies[group(op)])
         for op in ops
     )
     return Prediction(hardware=hardware.name, times=times)
@@ -138,7 +187,7 @@ def predict(
     model: ModelSpec,
     workload: WorkloadSpec,
     hardware: HardwareSpec,
-    efficiencies: Mapping[OpClass, Efficiency] | None = None,
+    efficiencies: Mapping[Group, Efficiency] | None = None,
 ) -> Prediction:
     """A workload's op graph, timed on a device."""
     return time_ops(op_graph(model, workload), hardware, efficiencies)

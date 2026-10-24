@@ -2,13 +2,14 @@
 and training on a T4."""
 
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from pydantic import ValidationError
 
 from scalelab.core.config import load_config
-from scalelab.costmodel.ops import Op, OpClass, op_graph
-from scalelab.costmodel.roofline import IDEAL, Efficiency, op_time, predict, time_ops
+from scalelab.costmodel.ops import Op, op_graph
+from scalelab.costmodel.roofline import IDEAL, Efficiency, Group, op_time, predict, time_ops
 from scalelab.costmodel.specs import HARDWARE, HardwareSpec, ModelSpec, WorkloadSpec
 
 HELLO = Path(__file__).resolve().parents[2] / "configs" / "experiments" / "hello.yaml"
@@ -105,21 +106,16 @@ def test_a_prediction_adds_up():
     assert sum(c.seconds for c in classes.values()) == pytest.approx(prediction.seconds)
 
 
-def test_efficiencies_apply_by_op_class():
+def test_efficiencies_apply_by_group():
     ops = op_graph(spec(), TRAIN)
-    every: dict[OpClass, Efficiency] = {
-        "gemm": IDEAL,
-        "gemv-decode": IDEAL,
-        "attention": IDEAL,
-        "elementwise": IDEAL,
-    }
+    every: dict[Group, Efficiency] = dict.fromkeys(get_args(Group), IDEAL)
     assert time_ops(ops, T4, every) == time_ops(ops, T4)
     slow = time_ops(ops, T4, {**every, "gemm": Efficiency(compute=0.5)})
     for s, i in zip(slow.times, time_ops(ops, T4).times, strict=True):
         assert s.compute_s == pytest.approx((2 if s.op.op_class == "gemm" else 1) * i.compute_s)
         assert s.memory_s == i.memory_s
-    del every["attention"]
-    with pytest.raises(KeyError):  # a class without an efficiency is an error
+    del every["norm.grad"]
+    with pytest.raises(KeyError):  # a group without an efficiency is an error
         time_ops(ops, T4, every)
 
 

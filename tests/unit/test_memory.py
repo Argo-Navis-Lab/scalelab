@@ -153,7 +153,13 @@ def test_m7_on_a_t4_can_sample_a_whole_rl_step():
 
 
 def test_a_model_that_does_not_fit_at_all_gets_zero():
-    tiny = HardwareSpec(name="tiny", memory_bytes=10**6, supports_bf16=False)  # 1 MB
+    tiny = HardwareSpec(  # 1 MB
+        name="tiny",
+        memory_bytes=10**6,
+        supports_bf16=False,
+        peak_flops={"fp32": 1e9},
+        memory_bw=1e9,
+    )
     assert max_generation_batch(spec("m4"), tiny, context=256) == 0
     assert max_generation_context(spec("m4"), tiny, batch=1) == 0
 

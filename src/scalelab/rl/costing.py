@@ -2,8 +2,9 @@
 runs it, and its whole run: how many steps the FLOPs budget buys and how long they take."""
 
 import math
+import statistics
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 import numpy as np
 
@@ -11,12 +12,16 @@ from scalelab.core.config import ExperimentConfig, StrictModel
 from scalelab.costmodel.rlstep import RLStepSpec, StepPrediction, predict_rl_step
 from scalelab.costmodel.roofline import Efficiency, Group
 from scalelab.costmodel.specs import HardwareSpec, ModelSpec
+from scalelab.costmodel.validate import PARTS
 from scalelab.rl.experiment import make_task
 from scalelab.rl.loop import GENERATION_BATCH, sample_problems
 from scalelab.tasks.tokenizer import encode
+from scalelab.telemetry.sink import MetricRow
 
 ANSWER_SAMPLES = 1000  # problems drawn per difficulty, for the answers' lengths
 SPEC_SEED = 0  # they're drawn from their own generator: a config always gets the same step
+SKIPPED_STEPS = 1  # step 1 also warms up (first allocations, kernel choices): left out (m3s10)
+TIMED = {f"system/{part}_s": part for part in PARTS}  # telemetry's laps of a step (m2s29)
 
 
 def rl_step_spec(config: ExperimentConfig) -> RLStepSpec:
@@ -72,3 +77,17 @@ def predict_rl_run(
     budget_steps = math.ceil(config.rl.flops / step.flops)
     steps = budget_steps if config.rl.max_steps is None else min(budget_steps, config.rl.max_steps)
     return RunPrediction(spec=spec, step=step, budget_steps=budget_steps, steps=steps)
+
+
+def measured_step(
+    rows: Iterable[MetricRow], skip: int = SKIPPED_STEPS
+) -> tuple[int, dict[str, float]]:
+    """A run's measured seconds a step: each part's mean over its steps after the first `skip`,
+    and how many steps those are. Runs from before m2s29, or with runtime.telemetry=false,
+    timed none: (0, {})."""
+    seconds: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        if row.metric in TIMED and row.step > skip:
+            seconds[TIMED[row.metric]].append(row.value)
+    means = {part: statistics.fmean(values) for part, values in seconds.items()}
+    return len(seconds.get("step", [])), means

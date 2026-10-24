@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import json
+import re
 import shutil
 import signal
 import sys
@@ -46,9 +47,12 @@ from scalelab.core.registry import (
 )
 from scalelab.core.storage import atomic_write_bytes, registry_path, scalelab_home
 from scalelab.costmodel.calibrate import calibrate, env_versions, load_calibration, save_calibration
+from scalelab.costmodel.rlstep import StepPrediction
+from scalelab.costmodel.roofline import Efficiency, Group
 from scalelab.costmodel.specs import CPU, HARDWARE, HardwareSpec
+from scalelab.costmodel.validate import PARTS, TARGET_MAPE, StepCheck, check_step, summarize
 from scalelab.models.transformer import Transformer
-from scalelab.rl.costing import predict_rl_run
+from scalelab.rl.costing import measured_step, predict_rl_run
 from scalelab.rl.evaluation import EvalResult, SampledResult
 from scalelab.rl.experiment import (
     grade_by_part,
@@ -63,7 +67,7 @@ from scalelab.rl.loop import SNAPSHOTS, RLStepMetrics
 from scalelab.rl.overhead import OVERHEAD_BUDGET, measure_overhead
 from scalelab.rl.warmstart_loop import StepMetrics
 from scalelab.telemetry.anomalies import AnomalyEvent, RunHalted
-from scalelab.telemetry.sink import MetricsSink, metrics_folder
+from scalelab.telemetry.sink import MetricsSink, metrics_folder, read_metrics
 
 EXIT_USAGE = 2  # the command line asked for something impossible
 EXIT_INTERRUPTED = 130  # stopped early with a checkpoint saved; run again to resume
@@ -590,6 +594,22 @@ def cost_calibrate(hardware_name: str) -> int:
     return 0
 
 
+def efficiencies_for(hardware_name: str) -> dict[Group, Efficiency] | None:
+    """This hardware's efficiencies from `scalelab cost calibrate`, printing where they came
+    from (and why they may be stale); None, the datasheet's peaks, when it has none (m3s10)."""
+    path = bench_folder(scalelab_home(), hardware_name) / CALIBRATION_FILE
+    if not path.is_file():
+        print("calibration:   none, so the datasheet's peaks and free launches (a lower bound)")
+        return None
+    with warnings.catch_warnings(record=True) as caught:  # StaleCalibration, one a version
+        warnings.simplefilter("always")
+        efficiencies = load_calibration(path, env_versions(capture_env())).efficiencies
+    print(f"calibration:   {path}")
+    for warning in caught:
+        print(f"warning:       {warning.message}")
+    return efficiencies
+
+
 def cost_predict(
     experiment: Path, overrides: Sequence[str], hardware_name: str, session_hours: float
 ) -> int:
@@ -602,17 +622,7 @@ def cost_predict(
         raise UsageError(f"cost predict times RL steps, and {experiment} is a warm start")
     print(f"experiment:    {config.name} (config {hashing.config_hash(config)})")
     print(f"hardware:      {hardware_name}")
-    path = bench_folder(scalelab_home(), hardware_name) / CALIBRATION_FILE
-    efficiencies = None
-    if path.is_file():
-        with warnings.catch_warnings(record=True) as caught:  # StaleCalibration, one a version
-            warnings.simplefilter("always")
-            efficiencies = load_calibration(path, env_versions(capture_env())).efficiencies
-        print(f"calibration:   {path}")
-        for warning in caught:
-            print(f"warning:       {warning.message}")
-    else:
-        print("calibration:   none, so the datasheet's peaks and free launches (a lower bound)")
+    efficiencies = efficiencies_for(hardware_name)
     run = predict_rl_run(config, hardware_spec(hardware_name), efficiencies)
     answers = [length for lengths in run.spec.answer_lengths.values() for length in lengths]
     print(f"answers:       {sum(answers) / len(answers):.1f} tokens on average (worked solutions)")
@@ -633,6 +643,68 @@ def cost_predict(
     else:
         fits = f"needs {sessions:.1f} of {session_hours:g} h (it resumes from checkpoints)"
     print(f"session:       {fits}; gradings and checkpoints come on top")
+    return 0
+
+
+def ran_on(label: str, hardware_name: str) -> bool:
+    """Did a run whose registry hardware label is `label` run on this one device? Runs on
+    several GPUs ("2x Tesla T4") don't count: the step model times one device."""
+    if hardware_name == "cpu":
+        return label == "cpu"
+    return re.match(r"\d+x ", label) is None and hardware_name.split("-")[0] in label.lower()
+
+
+def cost_validate(hardware_name: str) -> int:
+    """`scalelab cost validate`: the cost model's step against the steps RL runs on this
+    hardware measured (telemetry's laps, m2s29), phase by phase. Every whole step is held out:
+    the fit saw only single ops and decode steps (m3s7). Records nothing."""
+    home = scalelab_home()
+    hardware = hardware_spec(hardware_name)
+    print(f"hardware:      {hardware_name}")
+    efficiencies = efficiencies_for(hardware_name)
+    predictions: dict[str, StepPrediction] = {}  # config_hash -> its step: seeds share it
+    checks: list[StepCheck] = []
+    left_out = 0
+    with registry_copy(home) as registry:
+        for run in registry.list_runs():
+            config_json = registry.experiment_json(run.config_hash)
+            assert config_json is not None  # every run row points at an experiment row
+            if not ran_on(run.hardware, hardware_name) or json.loads(config_json).get("rl") is None:
+                continue  # another device, or a warm start
+            try:
+                config = ExperimentConfig.model_validate_json(config_json)
+            except ValueError:  # recorded before a field was renamed or dropped
+                left_out += 1
+                continue
+            steps, measured = measured_step(read_metrics(home, run.run_id))
+            if steps == 0:  # from before m2s29, or with telemetry off
+                left_out += 1
+                continue
+            if run.config_hash not in predictions:
+                predictions[run.config_hash] = predict_rl_run(config, hardware, efficiencies).step
+            checks.append(check_step(run.run_id, predictions[run.config_hash], steps, measured))
+    if not checks:
+        raise UsageError(f"no RL run on {hardware_name} timed its steps (telemetry does: m2s29)")
+    line = f"runs:          {len(checks)} RL runs timed their steps"
+    if left_out:
+        line += f" (left out {left_out}: no timed steps, or a config that no longer loads)"
+    print(line)
+    parts = "".join(f"{part:>10}" for part in PARTS)
+    print(f"{'run':<30}{'steps':>6}{parts}  step, predicted vs measured")
+    for check in checks:
+        errors = "".join(f"{check.errors[part]:>+10.1%}" for part in PARTS)
+        step = f"{check.predicted['step']:.3f} s vs {check.measured['step']:.3f} s"
+        print(f"{check.run_id:<30}{check.steps:6d}{errors}  {step}")
+    summary = summarize(checks)
+    print(f"{'part':<15}{'runs':>6}{'MAPE':>8}{'bias':>8}{'worst':>8}")
+    for part, errors in summary.items():
+        mape, bias, worst = f"{errors.mape:.1%}", f"{errors.bias:+.1%}", f"{errors.worst:+.1%}"
+        print(f"{part:<15}{errors.samples:6d}{mape:>8}{bias:>8}{worst:>8}")
+    step = summary["step"].mape
+    verdict = "within" if step <= TARGET_MAPE else "above"
+    print(
+        f"verdict:       step MAPE {step:.1%}, {verdict} the {TARGET_MAPE:.0%} M3's exit asks for"
+    )
     return 0
 
 
@@ -717,6 +789,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=12.0,
         help="how long a session lasts (default 12: Colab's free tier)",
     )
+    validate_parser = cost_commands.add_parser(
+        "validate", help="the cost model's steps against the RL steps timed on this hardware"
+    )
+    validate_parser.add_argument(
+        "--hardware",
+        required=True,
+        choices=["cpu", *HARDWARE],
+        help="its RL runs, and its calibration.json when it has one",
+    )
 
     args = parser.parse_args(argv)
     try:
@@ -730,6 +811,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return bench(args.hardware, args.models, args.suites, args.dry_run)
         if args.command == "cost" and args.cost_command == "calibrate":
             return cost_calibrate(args.hardware)
+        if args.command == "cost" and args.cost_command == "validate":
+            return cost_validate(args.hardware)
         if args.command == "cost":
             return cost_predict(args.experiment, args.overrides, args.hardware, args.session_hours)
         return run(args.experiment, args.overrides)

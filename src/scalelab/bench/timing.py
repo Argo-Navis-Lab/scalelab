@@ -3,13 +3,15 @@ median of several samples."""
 
 import statistics
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from functools import partial
 
 import torch
 from pydantic import Field, PositiveFloat
+from torch import Tensor
 
 from scalelab.core.config import StrictModel
-from scalelab.costmodel.ops import Op
+from scalelab.costmodel.ops import Op, grad_op
 
 WARMUP = 3  # untimed calls first: the first ones pick a kernel, allocate memory, warm caches
 REPEATS = 7  # timed samples; the median ignores a slow one (a hiccup elsewhere on the machine)
@@ -77,3 +79,31 @@ def measure(
         number *= 2
     samples = tuple(run(number) / number for _ in range(repeats))
     return Timing(number=number, samples=samples)
+
+
+def measure_forward_backward(
+    forward: Callable[[], Tensor],
+    inputs: Sequence[Tensor],
+    op: Op,
+    device: torch.device,
+    generator: torch.Generator,
+    *,
+    warmup: int = WARMUP,
+    repeats: int = REPEATS,
+    min_sample_s: float = MIN_SAMPLE_S,
+) -> list[Measurement]:
+    """Times forward() recording no graph (as sampling runs it), then, if it has inputs to give
+    gradients to, its backward pass alone: the forward runs once, and its gradients are taken
+    again and again. The backward's op is the op graph's rule of thumb, grad_op(op)."""
+    timed = partial(
+        measure, device=device, warmup=warmup, repeats=repeats, min_sample_s=min_sample_s
+    )
+    with torch.no_grad():
+        results = [Measurement(op=op, timing=timed(forward))]
+    if inputs:
+        out = forward()
+        grad = torch.randn(out.shape, generator=generator, device=device)
+        # retain_graph keeps what the forward saved, so the next call can use it again
+        backward = partial(torch.autograd.grad, out, inputs, grad, retain_graph=True)
+        results.append(Measurement(op=grad_op(op), timing=timed(backward)))
+    return results

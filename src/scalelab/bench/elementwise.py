@@ -10,8 +10,15 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from scalelab.bench.gemm import ROWS
-from scalelab.bench.timing import MIN_SAMPLE_S, REPEATS, WARMUP, Measurement, measure
-from scalelab.costmodel.ops import VALUE_BYTES, Op, grad_op
+from scalelab.bench.timing import (
+    MIN_SAMPLE_S,
+    REPEATS,
+    WARMUP,
+    Measurement,
+    measure,
+    measure_forward_backward,
+)
+from scalelab.costmodel.ops import VALUE_BYTES, Op
 from scalelab.costmodel.specs import ModelSpec
 from scalelab.models.norms import RMSNorm
 from scalelab.models.rope import RotaryEmbedding
@@ -151,22 +158,36 @@ def bench_elementwise(
     repeats: int = REPEATS,
     min_sample_s: float = MIN_SAMPLE_S,
 ) -> list[Measurement]:
-    """Times each op forward, recording no graph (as sampling runs it), then, when it has one,
-    its backward pass alone: the forward runs once, and its gradients are taken again and again."""
-    time = partial(
-        measure, device=device, warmup=warmup, repeats=repeats, min_sample_s=min_sample_s
-    )
+    """Times each op forward, then its backward pass alone, when it has one."""
     generator = torch.Generator(device).manual_seed(0)
     results: list[Measurement] = []
     for case in cases:
         forward, inputs = _kernel(case, device, generator)
-        op = case_op(case)
-        with torch.no_grad():
-            results.append(Measurement(op=op, timing=time(forward)))
-        if inputs:
-            out = forward()
-            grad = torch.randn(out.shape, generator=generator, device=device)
-            # retain_graph keeps what the forward saved, so the next call can use it again
-            backward = partial(torch.autograd.grad, out, inputs, grad, retain_graph=True)
-            results.append(Measurement(op=grad_op(op), timing=time(backward)))
+        results += measure_forward_backward(
+            forward,
+            inputs,
+            case_op(case),
+            device,
+            generator,
+            warmup=warmup,
+            repeats=repeats,
+            min_sample_s=min_sample_s,
+        )
+    return results
+
+    """Times each op forward, then its backward pass alone, when it has one."""
+    generator = torch.Generator(device).manual_seed(0)
+    results: list[Measurement] = []
+    for case in cases:
+        forward, inputs = _kernel(case, device, generator)
+        results += measure_forward_backward(
+            forward,
+            inputs,
+            case_op(case),
+            device,
+            generator,
+            warmup=warmup,
+            repeats=repeats,
+            min_sample_s=min_sample_s,
+        )
     return results

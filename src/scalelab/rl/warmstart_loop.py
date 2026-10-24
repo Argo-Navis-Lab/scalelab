@@ -113,7 +113,7 @@ def warm_start[P](
         lr = learning_rate(config, min(1.0, tokens / config.tokens))
         for group in optimizer.param_groups:
             group["lr"] = lr
-            timer.lap("data")  # drawing the problems, the batch, the bookkeeping
+        timer.lap("data")  # drawing the problems, the batch, the bookkeeping
 
         loss = warm_start_loss(model(batch.inputs.to(device)), batch.targets.to(device))
         optimizer.zero_grad()

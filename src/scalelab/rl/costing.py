@@ -30,6 +30,7 @@ ANSWER_SAMPLES = 1000  # problems drawn per difficulty, for the answers' lengths
 SPEC_SEED = 0  # they're drawn from their own generator: a config always gets the same step
 SKIPPED_STEPS = 1  # step 1 also warms up (first allocations, kernel choices): left out (m3s10)
 TIMED = {f"system/{part}_s": part for part in PARTS}  # telemetry's laps of a step (m2s29)
+WARM_START_PIECES = 4  # m3s15: the padding cut runs a warm start's batch in 4 pieces
 
 
 def rl_step_spec(config: ExperimentConfig) -> RLStepSpec:
@@ -128,3 +129,24 @@ def predict_step(
         return predict_rl_run(config, hardware, efficiencies).step
     model = ModelSpec.from_config(config.model)
     return predict_warm_start_step(model, warm_start_step_spec(config), hardware, efficiencies)
+
+
+def padding_cut(
+    config: ExperimentConfig,
+    hardware: HardwareSpec,
+    efficiencies: Mapping[Group, Efficiency] | None = None,
+    micro_batch: int | None = None,
+) -> StepPrediction:
+    """An experiment's step under the padding cut (m3s15): its rows sorted by length, then run
+    micro_batch at a time (default: RL's rl.micro_batch, a WARM_START_PIECES-th of a warm
+    start's batch), each piece padded only to its own longest row. The same rows and the same
+    update: only padding goes."""
+    model = ModelSpec.from_config(config.model)
+    if config.rl is not None:
+        rl = rl_step_spec(config)
+        update = {"sort_rows": True, "micro_batch": micro_batch or rl.micro_batch}
+        return predict_rl_step(model, rl.model_copy(update=update), hardware, efficiencies)
+    warm = warm_start_step_spec(config)
+    rows = micro_batch or math.ceil(warm.batch_size / WARM_START_PIECES)
+    cut = WarmStartStepSpec(lengths=warm.lengths, batch_size=warm.batch_size, micro_batch=rows)
+    return predict_warm_start_step(model, cut, hardware, efficiencies)

@@ -1,4 +1,5 @@
-"""`scalelab cost calibrate` and `scalelab cost predict` end to end, on the CPU (m3s9)."""
+"""`scalelab cost calibrate`, `cost predict` and `cost compare` (m3s15) end to end, on the CPU
+(m3s9)."""
 
 from pathlib import Path
 from typing import get_args
@@ -7,10 +8,13 @@ import pytest
 
 from scalelab.cli import main
 from scalelab.core.config import load_config
-from scalelab.costmodel.calibrate import Calibration, load_calibration, save_calibration
+from scalelab.core.hashing import config_hash
+from scalelab.costmodel.calibrate import Calibration, Errors, load_calibration, save_calibration
+from scalelab.costmodel.report import DecisionReport
 from scalelab.costmodel.roofline import Efficiency, Group
 from scalelab.costmodel.specs import CPU
-from scalelab.rl.costing import predict_rl_run
+from scalelab.costmodel.validate import Validation
+from scalelab.rl.costing import padding_cut, predict_rl_run, predict_step
 
 REPO = Path(__file__).resolve().parents[2]
 RL = REPO / "configs" / "experiments" / "rl.yaml"
@@ -85,3 +89,29 @@ def test_a_warm_start_has_nothing_to_predict(
     warm_start = REPO / "configs" / "experiments" / "warmstart.yaml"
     assert main(["cost", "predict", str(warm_start), "--hardware", "cpu"]) == 2
     assert "cost predict times RL steps, and" in capsys.readouterr().err
+
+
+def test_compare_prints_and_saves_a_decision_report(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["cost", "compare", str(RL), *SMALL, "--hardware", "cpu"]) == 0
+    config = load_config(RL, SMALL)
+    stem = home / "reports" / f"padding-cut-{config_hash(config)}-cpu"
+    report = DecisionReport.model_validate_json(stem.with_suffix(".json").read_text())
+    assert report.baseline == predict_step(config, CPU)
+    assert report.candidate == padding_cut(config, CPU)
+    assert report.validated is None  # a fresh home: nothing validated
+    out = capsys.readouterr().out
+    assert "validation:    none (cost validate saves one)\n" in out
+    assert stem.with_suffix(".md").read_text() in out
+    assert f"saved:         {stem}.md and .json\n" in out
+    path = home / "bench" / "cpu" / "validation.json"  # as cost validate saves it
+    errors = Errors(samples=15, mape=0.299, bias=-0.299, worst=-0.862)
+    path.parent.mkdir(parents=True)
+    path.write_text(Validation(hardware="cpu", errors={"step": errors}).model_dump_json())
+    assert main(["cost", "compare", str(RL), *SMALL, "--hardware", "cpu"]) == 0
+    assert f"validation:    {path}\n" in capsys.readouterr().out
+    report = DecisionReport.model_validate_json(stem.with_suffix(".json").read_text())
+    assert report.validated == errors
+    assert main(["cost", "compare", str(RL), "--hardware", "cpu", "--micro-batch", "0"]) == 2
+    assert "--micro-batch must be at least 1, not 0" in capsys.readouterr().err

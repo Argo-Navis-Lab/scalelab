@@ -9,6 +9,14 @@ from scalelab.costmodel.rlstep import StepPrediction
 
 PARTS = ("generate", "logprobs", "train", "step")  # the phases the model times, then the step
 TARGET_MAPE = 0.15  # M3's exit: whole steps within 15% on average
+VALIDATION_FILE = "validation.json"  # m3s15: cost validate's errors, beside calibration.json
+
+
+class Validation(StrictModel):
+    """cost validate's errors on one device, saved for cost compare's error band (m3s15)."""
+
+    hardware: str
+    errors: dict[str, Errors]  # each part's, over the runs that timed it
 
 
 class StepCheck(StrictModel):

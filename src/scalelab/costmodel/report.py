@@ -1,0 +1,93 @@
+"""Two ways to run the same steps, side by side: the cost model's step for each on one device, and
+whether the change is worth building, judged against how close the model's steps have come to
+measured ones there."""
+
+from pathlib import Path
+from typing import Literal
+
+from scalelab.core.config import StrictModel
+from scalelab.costmodel.calibrate import Errors
+from scalelab.costmodel.rlstep import StepPrediction
+
+Change = Literal["padding-cut"]
+CHANGES: dict[Change, str] = {  # what each change does to a step
+    "padding-cut": "rows sorted by length, then run in micro-batches, each padded only to its "
+    "own longest row (RL's log-probs too, in rl.micro_batch rows)",
+}
+
+
+def reports_folder(home: Path) -> Path:
+    """Where `scalelab cost compare` saves its reports: <home>/reports/."""
+    return home / "reports"
+
+
+class DecisionReport(StrictModel):
+    """What the cost model expects a change to do to one experiment's steps on one device."""
+
+    change: Change
+    experiment: str
+    config_hash: str
+    hardware: str
+    baseline: StepPrediction  # the loop as it runs now
+    candidate: StepPrediction  # with the change
+    validated: Errors | None  # cost validate's whole steps on this device (validation.json)
+
+    @property
+    def speedup(self) -> float:
+        return self.baseline.seconds / self.candidate.seconds
+
+    @property
+    def saving(self) -> float:
+        """The share of a step's time the change saves."""
+        return 1 - self.candidate.seconds / self.baseline.seconds
+
+    @property
+    def worth_building(self) -> bool:
+        """The saving beats the model's validated error on this device, so it isn't the model's
+        noise. Never on a device the model wasn't validated on."""
+        return self.validated is not None and self.saving > self.validated.mape
+
+    def markdown(self) -> str:
+        before, after = self.baseline, self.candidate
+        lines = [
+            f"# DecisionReport: {self.change}, {self.experiment} on {self.hardware}",
+            "",
+            f"Config {self.config_hash}. The change: {CHANGES[self.change]}.",
+            "",
+            "| phase | baseline s | candidate s | change | its bound | its slowest op class |",
+            "|---|---:|---:|---:|---|---|",
+        ]
+        for name, phase in before.phases.items():
+            cut = after.phases[name]
+            top = max(cut.by_class, key=cut.by_class.__getitem__)
+            change = cut.seconds / phase.seconds - 1
+            lines.append(
+                f"| {name} | {phase.seconds:.4f} | {cut.seconds:.4f} | {change:+.1%} "
+                f"| {cut.bottleneck} | {top} |"
+            )
+        lines += [
+            f"| step | {before.seconds:.4f} | {after.seconds:.4f} | {-self.saving:+.1%} | | |",
+            "",
+            f"- speedup: {self.speedup:.2f}x, {3600 / before.seconds:,.0f} -> "
+            f"{3600 / after.seconds:,.0f} steps an hour",
+            f"- FLOPs a step: {before.flops:.3g} -> {after.flops:.3g} "
+            f"({after.flops / before.flops - 1:+.1%}): padding is computed, and counted",
+        ]
+        if self.validated is None:
+            lines.append(
+                f"- error band: none, {self.hardware} has no validation (cost validate saves one)"
+            )
+            verdict = "not worth building on this evidence: the model is unvalidated here"
+        else:
+            errors = self.validated
+            low, high = after.seconds * (1 - errors.mape), after.seconds * (1 + errors.mape)
+            lines.append(
+                f"- error band: whole steps here land within {errors.mape:.1%} on average (bias "
+                f"{errors.bias:+.1%}, worst {errors.worst:+.1%}, {errors.samples} runs): the "
+                f"candidate's step {low:.4f}-{high:.4f} s"
+            )
+            action = "worth building" if self.worth_building else "not worth building"
+            relation = "above" if self.worth_building else "within"
+            verdict = f"{action}: the saving, {self.saving:.1%}, is {relation} the error"
+        lines.append(f"- verdict: {verdict}")
+        return "\n".join(lines) + "\n"

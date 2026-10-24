@@ -16,7 +16,7 @@ from scalelab.core.config import load_config
 from scalelab.core.envcapture import EnvInfo
 from scalelab.core.registry import Registry
 from scalelab.costmodel.specs import CPU
-from scalelab.costmodel.validate import PARTS, check_step
+from scalelab.costmodel.validate import PARTS, Validation, check_step
 from scalelab.rl.costing import measured_step, predict_rl_run, predict_step
 from scalelab.rl.gradings import load_gradings
 from scalelab.telemetry.sink import metrics_folder, read_metrics
@@ -392,3 +392,8 @@ def test_cost_validate_checks_each_run_that_timed_its_steps(
     assert f"{warm_start:<30}{steps:6d}{errors}  {warm.predicted['step']:.3f} s vs " in out
     mape = f"{(abs(check.errors['step']) + abs(warm.errors['step'])) / 2:.1%}"
     assert f"verdict:       step MAPE {mape}, " in out
+    validation = Validation.model_validate_json(
+        (home / "bench" / "cpu" / "validation.json").read_text()
+    )
+    assert validation.hardware == "cpu" and "step" in validation.errors  # m3s15: for cost compare
+    assert f"saved:         {home / 'bench' / 'cpu' / 'validation.json'}\n" in out

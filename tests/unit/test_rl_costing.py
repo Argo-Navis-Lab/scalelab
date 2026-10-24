@@ -10,6 +10,7 @@ from scalelab.costmodel.rlstep import predict_warm_start_step
 from scalelab.costmodel.specs import CPU, ModelSpec
 from scalelab.rl.costing import (
     ANSWER_SAMPLES,
+    padding_cut,
     predict_rl_run,
     predict_step,
     rl_step_spec,
@@ -91,3 +92,15 @@ def test_either_kind_of_experiment_has_a_step() -> None:
     assert predict_step(rl_config(), CPU) == predict_rl_run(rl_config(), CPU).step
     with pytest.raises(ValueError, match="is an RL experiment"):
         warm_start_step_spec(rl_config())
+
+
+def test_the_padding_cut_keeps_the_rows_and_drops_padding() -> None:
+    rl = rl_config("task.difficulties=[2, 3]")  # 2- and 3-digit prompts, so lengths differ
+    before, cut = predict_step(rl, CPU), padding_cut(rl, CPU)
+    assert cut.phases["generate"] == before.phases["generate"]  # decoding never pads
+    assert cut.phases["logprobs"].flops < before.phases["logprobs"].flops
+    assert cut.phases["train"].flops < before.phases["train"].flops
+    warm = load_config(EXPERIMENTS / "warmstart.yaml", ["task.difficulties=[2, 3]"])
+    assert padding_cut(warm, CPU).flops < predict_step(warm, CPU).flops
+    whole = padding_cut(warm, CPU, micro_batch=64)  # one piece: the batch as it comes
+    assert whole.seconds == pytest.approx(predict_step(warm, CPU).seconds, rel=1e-9)

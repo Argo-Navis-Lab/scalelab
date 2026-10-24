@@ -46,15 +46,29 @@ from scalelab.core.registry import (
     Registry,
     RunRecord,
 )
-from scalelab.core.storage import atomic_write_bytes, registry_path, scalelab_home
+from scalelab.core.storage import (
+    atomic_write_bytes,
+    atomic_write_text,
+    registry_path,
+    scalelab_home,
+)
 from scalelab.costmodel.calibrate import calibrate, env_versions, load_calibration, save_calibration
 from scalelab.costmodel.comms import COLLECTIVES, collective_time, fit_link
+from scalelab.costmodel.report import DecisionReport, reports_folder
 from scalelab.costmodel.rlstep import StepPrediction
 from scalelab.costmodel.roofline import Efficiency, Group
 from scalelab.costmodel.specs import CPU, HARDWARE, HardwareSpec
-from scalelab.costmodel.validate import PARTS, TARGET_MAPE, StepCheck, check_step, summarize
+from scalelab.costmodel.validate import (
+    PARTS,
+    TARGET_MAPE,
+    VALIDATION_FILE,
+    StepCheck,
+    Validation,
+    check_step,
+    summarize,
+)
 from scalelab.models.transformer import Transformer
-from scalelab.rl.costing import measured_step, predict_rl_run, predict_step
+from scalelab.rl.costing import measured_step, padding_cut, predict_rl_run, predict_step
 from scalelab.rl.evaluation import EvalResult, SampledResult
 from scalelab.rl.experiment import (
     grade_by_part,
@@ -660,8 +674,8 @@ def ran_on(label: str, hardware_name: str) -> bool:
 def cost_validate(hardware_name: str) -> int:
     """`scalelab cost validate`: the cost model's step against the steps runs on this hardware
     measured (telemetry's laps: RL runs' since m2s29, warm starts' since m3s11), phase by phase.
-    Every whole step is held out: the fit saw only single ops and decode steps (m3s7). Records
-    nothing."""
+    Every whole step is held out: the fit saw only single ops and decode steps (m3s7). Saves the
+    errors beside calibration.json, for cost compare (m3s15); records nothing in the registry."""
     home = scalelab_home()
     hardware = hardware_spec(hardware_name)
     print(f"hardware:      {hardware_name}")
@@ -712,6 +726,43 @@ def cost_validate(hardware_name: str) -> int:
     print(
         f"verdict:       step MAPE {step:.1%}, {verdict} the {TARGET_MAPE:.0%} M3's exit asks for"
     )
+    validation = Validation(hardware=hardware_name, errors=summary)  # m3s15: for cost compare
+    path = bench_folder(home, hardware_name) / VALIDATION_FILE
+    atomic_write_text(path, validation.model_dump_json(indent=2))
+    print(f"saved:         {path}")
+    return 0
+
+
+def cost_compare(
+    experiment: Path, overrides: Sequence[str], hardware_name: str, micro_batch: int | None
+) -> int:
+    """`scalelab cost compare` (m3s15): what the padding cut would do to an experiment's steps on
+    this hardware, as a DecisionReport, printed and saved under <home>/reports/ as Markdown and
+    JSON. Its error band is the last cost validate's on this hardware (validation.json). Runs
+    nothing, records nothing in the registry."""
+    if micro_batch is not None and micro_batch < 1:
+        raise UsageError(f"--micro-batch must be at least 1, not {micro_batch}")
+    config, _, _ = resolve(experiment, overrides)
+    home = scalelab_home()
+    hardware = hardware_spec(hardware_name)
+    efficiencies = efficiencies_for(hardware_name)
+    path = bench_folder(home, hardware_name) / VALIDATION_FILE
+    validation = Validation.model_validate_json(path.read_text()) if path.is_file() else None
+    print(f"validation:    {path if validation else 'none (cost validate saves one)'}")
+    report = DecisionReport(
+        change="padding-cut",
+        experiment=config.name,
+        config_hash=hashing.config_hash(config),
+        hardware=hardware_name,
+        baseline=predict_step(config, hardware, efficiencies),
+        candidate=padding_cut(config, hardware, efficiencies, micro_batch),
+        validated=validation.errors["step"] if validation else None,
+    )
+    stem = reports_folder(home) / f"{report.change}-{report.config_hash}-{hardware_name}"
+    atomic_write_text(stem.with_suffix(".md"), report.markdown())
+    atomic_write_text(stem.with_suffix(".json"), report.model_dump_json(indent=2))
+    print(report.markdown())
+    print(f"saved:         {stem}.md and .json")
     return 0
 
 
@@ -849,6 +900,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         choices=["cpu", *HARDWARE],
         help="its RL runs, and its calibration.json when it has one",
     )
+    compare_parser = cost_commands.add_parser(
+        "compare", help="what the padding cut would do to an experiment's steps (a DecisionReport)"
+    )
+    compare_parser.add_argument("experiment", type=Path, help="e.g. configs/experiments/rl.yaml")
+    compare_parser.add_argument("overrides", nargs="*", help="key=value changes, as for run")
+    compare_parser.add_argument(
+        "--hardware",
+        required=True,
+        choices=["cpu", *HARDWARE],
+        help="the device: its calibration.json, and validation.json for the error band",
+    )
+    compare_parser.add_argument(
+        "--micro-batch",
+        type=int,
+        help="rows a micro-batch under the cut (default: rl.micro_batch, or a quarter of a warm "
+        "start's batch)",
+    )
 
     comms_parser = cost_commands.add_parser(
         "comms", help="time collectives among processes here, and check the formulas on them"
@@ -877,6 +945,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cost_calibrate(args.hardware)
         if args.command == "cost" and args.cost_command == "validate":
             return cost_validate(args.hardware)
+        if args.command == "cost" and args.cost_command == "compare":
+            return cost_compare(args.experiment, args.overrides, args.hardware, args.micro_batch)
         if args.command == "cost" and args.cost_command == "comms":
             return cost_comms(args.world, args.backend)
         if args.command == "cost":

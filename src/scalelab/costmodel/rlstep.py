@@ -8,6 +8,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from typing import Literal
 
+import numpy as np
 from pydantic import Field, model_validator
 
 from scalelab.core.config import StrictModel
@@ -54,6 +55,37 @@ def expected_max(lengths: Sequence[int], rows: int) -> float:
     return sum(k * chance for k, chance in longest([lengths] * rows).items())
 
 
+def ranked(rows: Sequence[Sequence[int]], ranks: Sequence[int]) -> list[dict[int, float]]:
+    """For each rank r, the chance that the r-th shortest of several rows is k tokens, for every
+    k it can be (m3s15). Rows as in longest(), which is the rank len(rows) case."""
+    ordered = [np.sort(np.asarray(lengths)) for lengths in rows]
+    ks = np.unique(np.concatenate(ordered))
+    count = np.zeros((len(ks), len(rows) + 1))  # [i, j]: the chance j of the rows are <= ks[i]
+    count[:, 0] = 1.0  # before any row
+    for lengths in ordered:  # one row more: it is <= ks[i] with chance p, or it isn't
+        p = (np.searchsorted(lengths, ks, side="right") / len(lengths))[:, np.newaxis]
+        count[:, 1:] = count[:, 1:] * (1 - p) + count[:, :-1] * p
+        count[:, :1] *= 1 - p
+    chances: list[dict[int, float]] = []
+    for rank in ranks:
+        at_most = count[:, rank:].sum(axis=1)  # the r-th shortest is <= k: r or more rows are
+        exactly = np.diff(at_most, prepend=0.0)
+        chances.append(dict(zip(ks.tolist(), exactly.tolist(), strict=True)))
+    return chances
+
+
+def sorted_pieces(
+    rows: Sequence[Sequence[int]], micro_batch: int
+) -> list[tuple[int, dict[int, float]]]:
+    """The padding cut (m3s15): rows sorted by length, then run micro_batch at a time, so each
+    piece is padded only to its own longest row, the last one ranked in it. Each piece's rows,
+    and the chance its width is k tokens."""
+    starts = range(0, len(rows), micro_batch)
+    ends = [min(start + micro_batch, len(rows)) for start in starts]
+    sizes = [end - start for start, end in zip(starts, ends, strict=True)]
+    return list(zip(sizes, ranked(rows, ends), strict=True))
+
+
 class RLStepSpec(StrictModel):
     """One RL step's work, as the loop does it: its prompts' lengths in order, the lengths of
     the answers seen to prompts of each length (tokens written, <eos> included), and the
@@ -66,6 +98,7 @@ class RLStepSpec(StrictModel):
     micro_batch: int = Field(gt=0)
     epochs: int = Field(gt=0)
     reference: bool  # a KL penalty: the reference's log-probs are a second forward pass
+    sort_rows: bool = False  # m3s15: the padding cut (see predict_rl_step)
 
     @model_validator(mode="after")
     def check_answers(self) -> "RLStepSpec":
@@ -167,7 +200,10 @@ def predict_rl_step(
     """A step's expected time, phase by phase. A chunk keeps decoding until its longest answer
     is written, so each decode position counts with the chance the chunk still runs there:
     the expected MAXIMUM length sets generation's time, not the mean. Log-probs and training
-    run on rows padded to their longest prompt + answer, weighted the same way."""
+    run on rows padded to their longest prompt + answer, weighted the same way: log-probs in
+    one pass over every row, training micro_batch rows at a time as they come. Under the
+    padding cut (sort_rows, m3s15) the rows are sorted by length first, and both run in
+    micro-batches."""
     timed: dict[WorkloadSpec, Prediction] = {}
 
     def run(workload: WorkloadSpec) -> Prediction:  # each shape is timed once
@@ -176,15 +212,19 @@ def predict_rl_step(
         return timed[workload]
 
     def passes(
-        tally: _Tally, phase: Literal["prefill", "train"], rows: list[int], weight: int
+        tally: _Tally,
+        phase: Literal["prefill", "train"],
+        pieces: Sequence[tuple[int, Mapping[int, float]]],
+        weight: int,
     ) -> None:
-        """Forward (or forward and backward) passes over these rows, padded to the longest
-        prompt + answer, every row read but its last token."""
-        totals = [[length + n for n in step.answer_lengths[length]] for length in rows]
-        for width, chance in longest(totals).items():
-            if chance > 0:  # widths it can't be need no timing
-                workload = WorkloadSpec(phase=phase, batch=len(rows), tokens=width - 1)
-                tally.add(run(workload), weight * chance)
+        """Forward (or forward and backward) passes over pieces of rows, each its number of
+        rows and the chances of its width (its longest prompt + answer), every row read but
+        its last token."""
+        for size, widths in pieces:
+            for width, chance in widths.items():
+                if chance > 0:  # widths it can't be need no timing
+                    workload = WorkloadSpec(phase=phase, batch=size, tokens=width - 1)
+                    tally.add(run(workload), weight * chance)
 
     rows = step.rows
     generate = _Tally()
@@ -199,12 +239,19 @@ def predict_rl_step(
                 run(WorkloadSpec(phase="decode", batch=n, past=prompt + j, tokens=1)), running
             )
 
+    totals = [[length + n for n in step.answer_lengths[length]] for length in rows]
+    if step.sort_rows:  # m3s15: the padding cut
+        logprob_pieces = train_pieces = sorted_pieces(totals, step.micro_batch)
+    else:
+        logprob_pieces = [(len(totals), longest(totals))]  # one pass, all rows
+        parts = [totals[i : i + step.micro_batch] for i in range(0, len(totals), step.micro_batch)]
+        train_pieces = [(len(part), longest(part)) for part in parts]
+
     logprobs = _Tally()
-    passes(logprobs, "prefill", rows, weight=2 if step.reference else 1)  # one pass, all rows
+    passes(logprobs, "prefill", logprob_pieces, weight=2 if step.reference else 1)
 
     train = _Tally()
-    for start in range(0, len(rows), step.micro_batch):
-        passes(train, "train", rows[start : start + step.micro_batch], weight=step.epochs)
+    passes(train, "train", train_pieces, weight=step.epochs)
     train.add(time_ops(optimizer_ops(model), hardware, efficiencies), step.epochs)
 
     phases: dict[Phase, PhaseTime] = {
@@ -221,6 +268,7 @@ class WarmStartStepSpec(StrictModel):
 
     lengths: tuple[int, ...] = Field(min_length=1)
     batch_size: int = Field(gt=0)
+    micro_batch: int | None = Field(default=None, gt=0)  # m3s15: the padding cut
 
     @model_validator(mode="after")
     def check_lengths(self) -> "WarmStartStepSpec":
@@ -237,11 +285,26 @@ def predict_warm_start_step(
 ) -> StepPrediction:
     """A warm-start step's expected time: one forward and backward pass over the batch padded to
     its longest example, every token read but the last (each width weighted by its chance, as
-    RL's training is), then one update. Drawing the problems is CPU time the model leaves out."""
+    RL's training is), then one update. Drawing the problems is CPU time the model leaves out.
+    Under the padding cut (micro_batch, m3s15) the batch is sorted by length and run in pieces
+    of micro_batch rows, each padded only to its own longest example, then the one update."""
+
+    timed: dict[WorkloadSpec, Prediction] = {}
+
+    def run(workload: WorkloadSpec) -> Prediction:  # m3s15: pieces of one size share widths
+        if workload not in timed:
+            timed[workload] = time_ops(op_graph(model, workload), hardware, efficiencies)
+        return timed[workload]
+
+    rows = [step.lengths] * step.batch_size
+    if step.micro_batch is None:
+        pieces = [(step.batch_size, longest(rows))]
+    else:  # m3s15: the padding cut
+        pieces = sorted_pieces(rows, step.micro_batch)
     train = _Tally()
-    for width, chance in longest([step.lengths] * step.batch_size).items():
-        if chance > 0:  # widths it can't be need no timing
-            workload = WorkloadSpec(phase="train", batch=step.batch_size, tokens=width - 1)
-            train.add(time_ops(op_graph(model, workload), hardware, efficiencies), chance)
+    for size, widths in pieces:
+        for width, chance in widths.items():
+            if chance > 0:  # widths it can't be need no timing
+                train.add(run(WorkloadSpec(phase="train", batch=size, tokens=width - 1)), chance)
     train.add(time_ops(optimizer_ops(model), hardware, efficiencies))
     return StepPrediction(hardware=hardware.name, phases={"train": train.phase()})

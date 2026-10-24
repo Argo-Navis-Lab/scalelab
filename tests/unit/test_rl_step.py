@@ -1,6 +1,9 @@
 """RL step model tests: the longest of several rows, the expected maximum against the mean, a
 step's phases as the sums of their op graphs, the same FLOPs the loop counts, the update, and a
-warm start's step."""
+warm start's step. And the padding cut (m3s15): the rank-r shortest row, sorted micro-batches."""
+
+import itertools
+from collections import Counter
 
 import pytest
 import torch
@@ -17,6 +20,8 @@ from scalelab.costmodel.rlstep import (
     optimizer_ops,
     predict_rl_step,
     predict_warm_start_step,
+    ranked,
+    sorted_pieces,
 )
 from scalelab.costmodel.roofline import group, predict, time_ops
 from scalelab.costmodel.specs import HARDWARE, ModelSpec, WorkloadSpec
@@ -198,3 +203,49 @@ def test_a_warm_start_batch_is_as_wide_as_its_longest_example() -> None:
 def test_a_warm_start_example_reads_a_token_and_predicts_the_next() -> None:
     with pytest.raises(ValidationError, match="at least 2 tokens"):
         WarmStartStepSpec(lengths=(1, 9), batch_size=4)
+
+
+def test_the_rank_r_shortest_of_rows() -> None:
+    rows = [(1, 4), (2, 3, 3), (5,), (2, 4)]
+    ways = list(itertools.product(*rows))  # every way the rows can fall, each as likely
+    ranks = [1, 2, 3, 4]
+    for rank, chances in zip(ranks, ranked(rows, ranks), strict=True):
+        counts = Counter(sorted(way)[rank - 1] for way in ways)
+        assert chances == pytest.approx({k: counts[k] / len(ways) for k in chances}, abs=1e-12)
+    assert ranked(rows, [4])[0] == pytest.approx(longest(rows), abs=1e-12)
+
+
+def test_sorted_pieces_are_as_wide_as_the_last_row_ranked_in_them() -> None:
+    rows = [(1, 4), (2, 3, 3), (5,), (2, 4), (3,)]
+    pieces = sorted_pieces(rows, 2)
+    assert [size for size, _ in pieces] == [2, 2, 1]  # 5 rows, 2 at a time
+    for (_, widths), rank in zip(pieces, [2, 4, 5], strict=True):
+        assert widths == ranked(rows, [rank])[0]
+
+
+def test_the_padding_cut_sorts_the_rows_and_runs_log_probs_in_micro_batches() -> None:
+    # The 12 rows of 8 tokens (prompt 5 + answer 3) go first, then the 4 of 13: log-probs run as
+    # 8 rows 8 wide and 8 rows 13 wide, not all 16 rows 13 wide (twice: a reference too).
+    # Training's micro-batches were 13 and 8 wide as the rows came, and are 8 and 13 sorted.
+    step = _step(ANSWERS)
+    before = predict_rl_step(SPEC, step, T4)
+    cut = predict_rl_step(SPEC, step.model_copy(update={"sort_rows": True}), T4)
+    pieces = _seconds(
+        WorkloadSpec(phase="prefill", batch=8, tokens=7),
+        WorkloadSpec(phase="prefill", batch=8, tokens=12),
+    )
+    assert cut.phases["logprobs"].seconds == pytest.approx(2 * pieces, rel=1e-12)
+    assert cut.phases["generate"] == before.phases["generate"]  # decoding never pads
+    assert cut.phases["train"].seconds == pytest.approx(before.phases["train"].seconds, rel=1e-12)
+
+
+def test_a_warm_start_under_the_padding_cut_runs_sorted_micro_batches() -> None:
+    # 5 or 40 tokens, even odds, 8 rows in sorted pieces of 4. The first is narrow when 4 or more
+    # rows are 5 long (163 of 256 ways); the second, the longest row's, when all 8 are (1 of 256).
+    spec = WarmStartStepSpec(lengths=(5, 40), batch_size=8, micro_batch=4)
+    step = predict_warm_start_step(SPEC, spec, T4)
+    narrow = _seconds(WorkloadSpec(phase="train", batch=4, tokens=4))
+    wide = _seconds(WorkloadSpec(phase="train", batch=4, tokens=39))
+    update = time_ops(optimizer_ops(SPEC), T4).seconds
+    expected = narrow * (163 + 1) / 256 + wide * (93 + 255) / 256 + update
+    assert step.seconds == pytest.approx(expected, rel=1e-12)

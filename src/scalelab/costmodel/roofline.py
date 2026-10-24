@@ -67,6 +67,9 @@ KINDS: dict[str, Group] = {
     "residual": "residual",
     "attn_residual": "residual",
     "mlp_residual": "residual",
+    "optim.clip_norm": "copy",  # m3s8: the update streams every weight through memory as a copy
+    "optim.clip_scale": "copy",  # does (no bench of its own)
+    "optim.adamw": "copy",
 }
 # Backward kernels unlike their forward ones get an efficiency of their own. A residual add's
 # gradient is an add like the forward; the embedding's is a scatter, about a copy.

@@ -3,8 +3,9 @@ it. B never counts FLOPs itself."""
 
 from scalelab.core.config import StrictModel
 from scalelab.costmodel.ops import NO_FLOPS, FlopCounts, count_flops
+from scalelab.costmodel.rlstep import decode_chunks
 from scalelab.costmodel.specs import ModelSpec, WorkloadSpec
-from scalelab.rl.rollout import RolloutBatch, decode_chunks
+from scalelab.rl.rollout import RolloutBatch
 
 
 class StepFlops(StrictModel):

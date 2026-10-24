@@ -1,7 +1,6 @@
 """Rollouts: several sampled answers to each prompt, written with the KV cache and kept with
 everything RL needs to score them and learn from them."""
 
-from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -10,6 +9,7 @@ import torch
 from torch import Tensor
 
 from scalelab.core.config import SamplingParams
+from scalelab.costmodel.rlstep import decode_chunks
 from scalelab.models.transformer import Transformer
 from scalelab.rl.sampling import sample
 from scalelab.tasks.tokenizer import EOS, PAD
@@ -105,20 +105,6 @@ def generate(
         group_ids=torch.tensor(groups),
         policy_version=policy_version,
     )
-
-
-def decode_chunks(prompt_lengths: Sequence[int], batch_size: int) -> list[list[int]]:
-    """Which rows generate() decodes together: rows whose prompts have the same length (in
-    the order those lengths first appear), at most batch_size at a time. The cost model
-    reads the same plan, so it counts the work generate() really did."""
-    same_length: dict[int, list[int]] = defaultdict(list)  # prompt length -> those rows
-    for row, length in enumerate(prompt_lengths):
-        same_length[length].append(row)
-    return [
-        rows[first : first + batch_size]
-        for rows in same_length.values()
-        for first in range(0, len(rows), batch_size)
-    ]
 
 
 def _sample_batch(

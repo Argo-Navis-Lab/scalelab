@@ -8,10 +8,11 @@ from torch.utils.flop_counter import FlopCounterMode
 
 from scalelab.core.config import AlgoConfig, ModelConfig, SamplingParams
 from scalelab.costmodel.ops import NO_FLOPS, count_flops
+from scalelab.costmodel.rlstep import decode_chunks
 from scalelab.costmodel.specs import ModelSpec, WorkloadSpec
 from scalelab.models.transformer import Transformer
 from scalelab.rl.flops import logprob_flops, rl_step_flops, sampling_flops, training_flops
-from scalelab.rl.rollout import RolloutBatch, decode_chunks, generate
+from scalelab.rl.rollout import RolloutBatch, generate
 from scalelab.rl.trainer import rl_update
 from scalelab.tasks.tokenizer import encode
 

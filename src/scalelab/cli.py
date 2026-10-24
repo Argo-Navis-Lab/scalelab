@@ -19,6 +19,7 @@ import yaml
 
 from scalelab.analysis.reports import gains
 from scalelab.analysis.stats import Interval
+from scalelab.bench.comms import SIZES, Backend, bench_collectives
 from scalelab.bench.suites import (
     SUITES,
     Suite,
@@ -47,6 +48,7 @@ from scalelab.core.registry import (
 )
 from scalelab.core.storage import atomic_write_bytes, registry_path, scalelab_home
 from scalelab.costmodel.calibrate import calibrate, env_versions, load_calibration, save_calibration
+from scalelab.costmodel.comms import COLLECTIVES, collective_time, fit_link
 from scalelab.costmodel.rlstep import StepPrediction
 from scalelab.costmodel.roofline import Efficiency, Group
 from scalelab.costmodel.specs import CPU, HARDWARE, HardwareSpec
@@ -713,6 +715,50 @@ def cost_validate(hardware_name: str) -> int:
     return 0
 
 
+def cost_comms(worlds: Sequence[int], backend: Backend) -> int:
+    """`scalelab cost comms`: times all-reduce, all-gather and reduce-scatter among processes on
+    this machine (gloo: CPU processes; nccl: one GPU each) at each world size, fits a link
+    (alpha, beta) to the all-reduce at every other message size, and checks the formulas on the
+    other timings: the all-reduce's other sizes and every size of the other two. One link a
+    world size: processes on one machine share its memory, so more of them get less bandwidth
+    each. Saves and records nothing."""
+    if min(worlds) < 2:
+        raise UsageError("--world: a collective needs 2 processes or more")
+    gpus = torch.cuda.device_count()
+    if backend == "nccl" and gpus < max(worlds):
+        raise UsageError(
+            f"--world {max(worlds)} over nccl needs as many GPUs; this machine has {gpus}"
+        )
+    sizes = ", ".join(f"{n >> 20} MB" if n >= 1 << 20 else f"{n >> 10} KB" for n in SIZES[::2])
+    print(f"backend:       {backend}")
+    print(f"fit:           all_reduce at {sizes}; checked on the rest")
+    rows: list[str] = []
+    for world in worlds:
+        start = time.perf_counter()
+        measured = bench_collectives(world, backend)
+        by_collective = {c: [m for m in measured if m.collective == c] for c in COLLECTIVES}
+        fit = by_collective["all_reduce"][::2]  # each collective's timings are in SIZES order
+        link = fit_link("all_reduce", world, [(m.nbytes, m.seconds) for m in fit])
+        print(
+            f"world {world}:       {len(measured)} timings in "
+            f"{duration(time.perf_counter() - start)}: "
+            f"alpha {link.alpha * 1e6:.1f} us, beta {link.beta / 1e9:.2f} GB/s",
+            flush=True,
+        )
+        for collective in COLLECTIVES:
+            timings = by_collective[collective]
+            held_out = timings[1::2] if collective == "all_reduce" else timings
+            errors = [
+                collective_time(collective, m.nbytes, world, link) / m.seconds - 1 for m in held_out
+            ]
+            mape = f"{sum(abs(e) for e in errors) / len(errors):.1%}"
+            bias, worst = f"{sum(errors) / len(errors):+.1%}", f"{max(errors, key=abs):+.1%}"
+            rows.append(f"{collective:<15}{world:6d}{len(errors):6d}{mape:>8}{bias:>8}{worst:>8}")
+    print(f"{'collective':<15}{'world':>6}{'sizes':>6}{'MAPE':>8}{'bias':>8}{'worst':>8}")
+    print("\n".join(rows))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scalelab", description="ScaleLab command line.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -804,6 +850,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="its RL runs, and its calibration.json when it has one",
     )
 
+    comms_parser = cost_commands.add_parser(
+        "comms", help="time collectives among processes here, and check the formulas on them"
+    )
+    comms_parser.add_argument(
+        "--world", nargs="+", type=int, default=[2, 4], help="processes taking part (default 2 4)"
+    )
+    comms_parser.add_argument(
+        "--backend",
+        choices=["gloo", "nccl"],
+        default="gloo",
+        help="gloo: processes on the CPU (default); nccl: one GPU each",
+    )
+
     args = parser.parse_args(argv)
     try:
         if args.command == "grade":
@@ -818,6 +877,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cost_calibrate(args.hardware)
         if args.command == "cost" and args.cost_command == "validate":
             return cost_validate(args.hardware)
+        if args.command == "cost" and args.cost_command == "comms":
+            return cost_comms(args.world, args.backend)
         if args.command == "cost":
             return cost_predict(args.experiment, args.overrides, args.hardware, args.session_hours)
         return run(args.experiment, args.overrides)

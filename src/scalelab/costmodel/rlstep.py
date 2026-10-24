@@ -108,6 +108,11 @@ class StepPrediction(StrictModel):
         return sum(phase.seconds for phase in self.phases.values())
 
     @property
+    def flops(self) -> float:
+        """Its expected matmul FLOPs: what the loop counts against the budget (m3s9)."""
+        return sum(phase.flops for phase in self.phases.values())
+
+    @property
     def slowest(self) -> Phase:
         """The phase that takes longest: where a speed-up pays most."""
         return max(self.phases, key=lambda phase: self.phases[phase].seconds)

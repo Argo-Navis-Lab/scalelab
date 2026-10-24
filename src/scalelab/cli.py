@@ -8,6 +8,7 @@ import signal
 import sys
 import tempfile
 import time
+import warnings
 from collections.abc import Generator, Sequence
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,14 @@ import yaml
 
 from scalelab.analysis.reports import gains
 from scalelab.analysis.stats import Interval
-from scalelab.bench.suites import SUITES, Suite, bench_folder, plan_suite, save_results
+from scalelab.bench.suites import (
+    SUITES,
+    Suite,
+    bench_folder,
+    load_samples,
+    plan_suite,
+    save_results,
+)
 from scalelab.core import hashing
 from scalelab.core.checkpoint import CheckpointPolicy
 from scalelab.core.config import (
@@ -37,8 +45,10 @@ from scalelab.core.registry import (
     RunRecord,
 )
 from scalelab.core.storage import atomic_write_bytes, registry_path, scalelab_home
-from scalelab.costmodel.specs import HARDWARE
+from scalelab.costmodel.calibrate import calibrate, env_versions, load_calibration, save_calibration
+from scalelab.costmodel.specs import CPU, HARDWARE, HardwareSpec
 from scalelab.models.transformer import Transformer
+from scalelab.rl.costing import predict_rl_run
 from scalelab.rl.evaluation import EvalResult, SampledResult
 from scalelab.rl.experiment import (
     grade_by_part,
@@ -62,6 +72,7 @@ EXIT_OVER_BUDGET = 1  # m2s36: `scalelab overhead` found telemetry costs more th
 # m3s6: `scalelab bench --models` names files in this folder, as in model=ladder_s/m2
 MODELS_FOLDER = Path("configs") / "models"
 BENCH_MODELS = ("ladder_s/m1", "ladder_s/m2", "ladder_s/m3", "ladder_s/m4")  # what M1/M2 ran
+CALIBRATION_FILE = "calibration.json"  # m3s9: saved beside the bench results it was fitted to
 METRIC = "greedy_pass@1"  # the greedy grade's name in the evals table
 SAMPLED_KS = (1, 4)  # RL's sampled grades: pass@1, and pass@4 (how often 4 tries find it)
 
@@ -547,6 +558,84 @@ def bench(
     return 0
 
 
+def hardware_spec(name: str) -> HardwareSpec:
+    """A hardware profile by its name; cpu is this machine's CPU, as the cost model stands it in."""
+    return CPU if name == "cpu" else HARDWARE[name]
+
+
+def cost_calibrate(hardware_name: str) -> int:
+    """`scalelab cost calibrate`: fits the cost model's efficiencies to the results `scalelab
+    bench` saved for this hardware, and saves them beside those results. Records nothing in the
+    registry."""
+    folder = bench_folder(scalelab_home(), hardware_name)
+    try:
+        samples, versions = load_samples(folder)
+    except (FileNotFoundError, ValueError) as err:
+        raise UsageError(str(err)) from None
+    calibration = calibrate(samples, hardware_spec(hardware_name), versions)
+    path = folder / CALIBRATION_FILE
+    save_calibration(path, calibration)
+    print(f"hardware:      {hardware_name}")
+    print(f"measured on:   {', '.join(f'{key} {value}' for key, value in versions.items())}")
+    print(f"samples:       {len(samples)} from {folder}")
+    print(f"{'group':<15}{'compute':>8}{'memory':>8}{'launch':>11}   (1.000: never the limit)")
+    for name, efficiency in calibration.efficiencies.items():
+        launch = f"{efficiency.launch_s * 1e6:.2f} us"
+        print(f"{name:<15}{efficiency.compute:8.3f}{efficiency.memory:8.3f}{launch:>11}")
+    print(f"{'suite':<15}{'samples':>8}{'MAPE':>8}{'bias':>8}{'worst':>8}")
+    for suite, errors in calibration.errors.items():
+        mape, bias, worst = f"{errors.mape:.1%}", f"{errors.bias:+.1%}", f"{errors.worst:+.1%}"
+        print(f"{suite:<15}{errors.samples:8d}{mape:>8}{bias:>8}{worst:>8}")
+    print(f"saved:         {path}")
+    return 0
+
+
+def cost_predict(
+    experiment: Path, overrides: Sequence[str], hardware_name: str, session_hours: float
+) -> int:
+    """`scalelab cost predict`: how long an RL experiment's steps would take on this hardware,
+    phase by phase, and whether its whole run fits in a session. Uses the hardware's calibration
+    from `scalelab cost calibrate` if there is one, else the datasheet's peaks with free
+    launches (a lower bound). Runs nothing, records nothing."""
+    config, _, _ = resolve(experiment, overrides)
+    if config.rl is None:
+        raise UsageError(f"cost predict times RL steps, and {experiment} is a warm start")
+    print(f"experiment:    {config.name} (config {hashing.config_hash(config)})")
+    print(f"hardware:      {hardware_name}")
+    path = bench_folder(scalelab_home(), hardware_name) / CALIBRATION_FILE
+    efficiencies = None
+    if path.is_file():
+        with warnings.catch_warnings(record=True) as caught:  # StaleCalibration, one a version
+            warnings.simplefilter("always")
+            efficiencies = load_calibration(path, env_versions(capture_env())).efficiencies
+        print(f"calibration:   {path}")
+        for warning in caught:
+            print(f"warning:       {warning.message}")
+    else:
+        print("calibration:   none, so the datasheet's peaks and free launches (a lower bound)")
+    run = predict_rl_run(config, hardware_spec(hardware_name), efficiencies)
+    answers = [length for lengths in run.spec.answer_lengths.values() for length in lengths]
+    print(f"answers:       {sum(answers) / len(answers):.1f} tokens on average (worked solutions)")
+    print(f"{'phase':<15}{'seconds':>8}{'share':>7}  bound    slowest op class")
+    for name, phase in run.step.phases.items():
+        share = f"{phase.seconds / run.step.seconds:.0%}"
+        top = max(phase.by_class, key=phase.by_class.__getitem__)
+        slowest = f"{top} {phase.by_class[top]:.3f} s"
+        print(f"{name:<15}{phase.seconds:8.3f}{share:>7}  {phase.bottleneck:<9}{slowest}")
+    print(f"{'step':<15}{run.step.seconds:8.3f}{'':>7}  {run.step.flops:.3g} FLOPs")
+    line = f"run:           {run.steps} steps, {duration(run.seconds)}"
+    if run.steps < run.budget_steps:
+        line += f" (rl.max_steps: the FLOPs budget buys {run.budget_steps})"
+    print(line)
+    sessions = run.seconds / (session_hours * 3600)
+    if sessions <= 1:
+        fits = f"fits in one of {session_hours:g} h ({sessions:.1%} of it)"
+    else:
+        fits = f"needs {sessions:.1f} of {session_hours:g} h (it resumes from checkpoints)"
+    print(f"session:       {fits}; gradings and checkpoints come on top")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scalelab", description="ScaleLab command line.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -600,6 +689,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--dry-run", action="store_true", help="say what would be timed, and time nothing"
     )
 
+    cost_parser = commands.add_parser("cost", help="the cost model: fit it, predict with it")
+    cost_commands = cost_parser.add_subparsers(dest="cost_command", required=True)
+    calibrate_parser = cost_commands.add_parser(
+        "calibrate", help="fit the cost model to this hardware's bench results"
+    )
+    calibrate_parser.add_argument(
+        "--hardware",
+        required=True,
+        choices=["cpu", *HARDWARE],
+        help="reads <home>/bench/<hardware>/ and saves calibration.json there",
+    )
+    predict_parser = cost_commands.add_parser(
+        "predict", help="how long an RL experiment's steps and whole run would take"
+    )
+    predict_parser.add_argument("experiment", type=Path, help="e.g. configs/experiments/rl.yaml")
+    predict_parser.add_argument("overrides", nargs="*", help="key=value changes, as for run")
+    predict_parser.add_argument(
+        "--hardware",
+        required=True,
+        choices=["cpu", *HARDWARE],
+        help="the device: its calibration.json from cost calibrate, when it has one",
+    )
+    predict_parser.add_argument(
+        "--session-hours",
+        type=float,
+        default=12.0,
+        help="how long a session lasts (default 12: Colab's free tier)",
+    )
+
     args = parser.parse_args(argv)
     try:
         if args.command == "grade":
@@ -610,6 +728,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return report_gains()
         if args.command == "bench":
             return bench(args.hardware, args.models, args.suites, args.dry_run)
+        if args.command == "cost" and args.cost_command == "calibrate":
+            return cost_calibrate(args.hardware)
+        if args.command == "cost":
+            return cost_predict(args.experiment, args.overrides, args.hardware, args.session_hours)
         return run(args.experiment, args.overrides)
     except UsageError as err:
         print(f"scalelab: error: {err}", file=sys.stderr)

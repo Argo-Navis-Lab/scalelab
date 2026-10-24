@@ -166,3 +166,15 @@ class ModelSpec(StrictModel):
             norms=(2 * layers + 1) * d,
             head=0 if self.tied_embeddings else d * self.vocab,
         )
+
+
+# m3s9: this machine's CPU, where benches and calibrations run without a GPU. Its peaks are a
+# stand-in, high enough for an Apple M2 (about 1 TFLOP/s of fp32 reached, 100 GB/s) that the
+# fitted efficiencies stay at most 1: a CPU's efficiencies only hold against this spec.
+CPU = HardwareSpec(
+    name="cpu",
+    memory_bytes=16 * 2**30,
+    supports_bf16=False,
+    peak_flops={"fp32": 2e12},
+    memory_bw=100e9,
+)

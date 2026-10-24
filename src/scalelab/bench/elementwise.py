@@ -174,20 +174,3 @@ def bench_elementwise(
             min_sample_s=min_sample_s,
         )
     return results
-
-    """Times each op forward, then its backward pass alone, when it has one."""
-    generator = torch.Generator(device).manual_seed(0)
-    results: list[Measurement] = []
-    for case in cases:
-        forward, inputs = _kernel(case, device, generator)
-        results += measure_forward_backward(
-            forward,
-            inputs,
-            case_op(case),
-            device,
-            generator,
-            warmup=warmup,
-            repeats=repeats,
-            min_sample_s=min_sample_s,
-        )
-    return results

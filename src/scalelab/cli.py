@@ -13,9 +13,11 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import yaml
 
 from scalelab.analysis.reports import gains
 from scalelab.analysis.stats import Interval
+from scalelab.bench.suites import SUITES, Suite, bench_folder, plan_suite, save_results
 from scalelab.core import hashing
 from scalelab.core.checkpoint import CheckpointPolicy
 from scalelab.core.config import (
@@ -35,6 +37,7 @@ from scalelab.core.registry import (
     RunRecord,
 )
 from scalelab.core.storage import atomic_write_bytes, registry_path, scalelab_home
+from scalelab.costmodel.specs import HARDWARE
 from scalelab.models.transformer import Transformer
 from scalelab.rl.evaluation import EvalResult, SampledResult
 from scalelab.rl.experiment import (
@@ -56,6 +59,9 @@ EXIT_USAGE = 2  # the command line asked for something impossible
 EXIT_INTERRUPTED = 130  # stopped early with a checkpoint saved; run again to resume
 EXIT_HALTED = 1  # m2s35: a detector's HALT stopped the run, recorded failed (as a crash is)
 EXIT_OVER_BUDGET = 1  # m2s36: `scalelab overhead` found telemetry costs more than its budget
+# m3s6: `scalelab bench --models` names files in this folder, as in model=ladder_s/m2
+MODELS_FOLDER = Path("configs") / "models"
+BENCH_MODELS = ("ladder_s/m1", "ladder_s/m2", "ladder_s/m3", "ladder_s/m4")  # what M1/M2 ran
 METRIC = "greedy_pass@1"  # the greedy grade's name in the evals table
 SAMPLED_KS = (1, 4)  # RL's sampled grades: pass@1, and pass@4 (how often 4 tries find it)
 
@@ -498,6 +504,49 @@ def report_gains() -> int:
     return 0
 
 
+def load_model(choice: str) -> ModelConfig:
+    """A model config by its name under configs/models/, as in model=ladder_s/m2."""
+    path = MODELS_FOLDER / f"{choice}.yaml"
+    if not path.is_file():
+        raise UsageError(f"no model config {choice!r}: {path} doesn't exist")
+    return ModelConfig.model_validate(yaml.safe_load(path.read_text()))
+
+
+def bench(
+    hardware_name: str, choices: Sequence[str], suites: Sequence[Suite], dry_run: bool
+) -> int:
+    """`scalelab bench`: times the cost model's ops and whole decode steps, shaped as the
+    models' own, on this machine's GPU (its CPU for --hardware cpu), and saves each suite's
+    results to <home>/bench/<hardware>/<suite>.parquet. Records nothing in the registry. A dry
+    run only says what it would time."""
+    hardware = HARDWARE.get(hardware_name)  # None: the CPU, whose memory isn't modelled
+    models = [load_model(choice) for choice in choices]
+    device = torch.device("cpu" if hardware is None else "cuda")
+    if hardware is not None and not dry_run:
+        if not torch.cuda.is_available():
+            raise UsageError(f"--hardware {hardware_name} needs its GPU; this machine has none")
+        gpu = torch.cuda.get_device_name()
+        if hardware_name.split("-")[0] not in gpu.lower():  # a100-40g: "NVIDIA A100-SXM4-40GB"
+            raise UsageError(f"--hardware {hardware_name}, but this machine's GPU is a {gpu}")
+    folder = bench_folder(scalelab_home(), hardware_name)
+    print(f"hardware:      {hardware_name}")
+    print(f"models:        {' '.join(choices)}")
+    print(f"results:       {folder}{' (dry run: nothing is timed or saved)' if dry_run else ''}")
+    env = capture_env()
+    for suite in suites:
+        plan = plan_suite(suite, models, hardware)
+        line = f"{suite + ':':<15}{plan.cases} cases"
+        if plan.skipped:
+            line += f" ({plan.skipped} more too big for {hardware_name})"
+        if plan.cases and not dry_run:
+            start = time.perf_counter()
+            results = plan.run(device)
+            save_results(folder / f"{suite}.parquet", results, env)
+            line += f": {len(results)} timings in {duration(time.perf_counter() - start)}"
+        print(line, flush=True)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scalelab", description="ScaleLab command line.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -528,6 +577,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     report_parser.add_argument(
         "report", choices=["gains"], help="gains: what RL did to greedy pass@1, over seeds"
     )
+
+    bench_parser = commands.add_parser(
+        "bench", help="time the cost model's ops on this machine, for calibration"
+    )
+    bench_parser.add_argument(
+        "--hardware",
+        required=True,
+        choices=["cpu", *HARDWARE],
+        help="the device's profile: results go to <home>/bench/<hardware>/",
+    )
+    bench_parser.add_argument(
+        "--models",
+        nargs="+",
+        default=list(BENCH_MODELS),
+        help="model configs whose shapes are timed (default: ladder_s/m1 to ladder_s/m4)",
+    )
+    bench_parser.add_argument(
+        "--suites", nargs="+", choices=SUITES, default=list(SUITES), help="default: all five"
+    )
+    bench_parser.add_argument(
+        "--dry-run", action="store_true", help="say what would be timed, and time nothing"
+    )
+
     args = parser.parse_args(argv)
     try:
         if args.command == "grade":
@@ -536,6 +608,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return overhead(args.experiment, args.overrides, args.steps, args.warmup)
         if args.command == "report":
             return report_gains()
+        if args.command == "bench":
+            return bench(args.hardware, args.models, args.suites, args.dry_run)
         return run(args.experiment, args.overrides)
     except UsageError as err:
         print(f"scalelab: error: {err}", file=sys.stderr)

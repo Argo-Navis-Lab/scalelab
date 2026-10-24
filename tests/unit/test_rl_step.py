@@ -1,18 +1,22 @@
 """RL step model tests: the longest of several rows, the expected maximum against the mean, a
-step's phases as the sums of their op graphs, the same FLOPs the loop counts, and the update."""
+step's phases as the sums of their op graphs, the same FLOPs the loop counts, the update, and a
+warm start's step."""
 
 import pytest
 import torch
 from pydantic import ValidationError
 
 from scalelab.core.config import ModelConfig
+from scalelab.costmodel.ops import count_flops
 from scalelab.costmodel.rlstep import (
     RLStepSpec,
     StepPrediction,
+    WarmStartStepSpec,
     expected_max,
     longest,
     optimizer_ops,
     predict_rl_step,
+    predict_warm_start_step,
 )
 from scalelab.costmodel.roofline import group, predict, time_ops
 from scalelab.costmodel.specs import HARDWARE, ModelSpec, WorkloadSpec
@@ -168,3 +172,29 @@ def test_every_prompt_length_needs_answers(
 ) -> None:
     with pytest.raises(ValidationError, match=message):
         _step(answers)
+
+
+# --- added in m3s11: a warm start's step ----------------------------------------------------
+
+
+def test_a_warm_start_step_is_one_train_pass_then_the_update() -> None:
+    step = predict_warm_start_step(SPEC, WarmStartStepSpec(lengths=(9,), batch_size=4), T4)
+    assert list(step.phases) == ["train"]
+    workload = WorkloadSpec(phase="train", batch=4, tokens=8)  # 9 tokens: 8 read in each row
+    update = time_ops(optimizer_ops(SPEC), T4).seconds
+    assert step.seconds == pytest.approx(_seconds(workload) + update, rel=1e-12)
+    assert step.flops == count_flops(SPEC, workload).total  # what the loop counts
+
+
+def test_a_warm_start_batch_is_as_wide_as_its_longest_example() -> None:
+    # 5 or 40 tokens, even odds: all 8 rows are 5 long with chance 1/256, else the batch is 39 wide.
+    step = predict_warm_start_step(SPEC, WarmStartStepSpec(lengths=(5, 40), batch_size=8), T4)
+    narrow = _seconds(WorkloadSpec(phase="train", batch=8, tokens=4))
+    wide = _seconds(WorkloadSpec(phase="train", batch=8, tokens=39))
+    update = time_ops(optimizer_ops(SPEC), T4).seconds
+    assert step.seconds == pytest.approx(narrow / 256 + wide * 255 / 256 + update, rel=1e-12)
+
+
+def test_a_warm_start_example_reads_a_token_and_predicts_the_next() -> None:
+    with pytest.raises(ValidationError, match="at least 2 tokens"):
+        WarmStartStepSpec(lengths=(1, 9), batch_size=4)

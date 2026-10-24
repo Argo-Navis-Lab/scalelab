@@ -199,7 +199,8 @@ class RuntimeConfig(StrictModel):
     # to stop, and at the end.
     checkpoint_every: int | None = Field(default=None, gt=0)
     # m2s36: False runs RL without telemetry (no collectors, metrics or detectors), to see
-    # what it costs; `scalelab overhead` measures exactly that. Warm starts have none.
+    # what it costs; `scalelab overhead` measures exactly that. A warm start has no collectors,
+    # only its step times (m3s11), which False turns off too.
     telemetry: bool = True
 
 

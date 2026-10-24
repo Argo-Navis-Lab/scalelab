@@ -69,3 +69,30 @@ def test_measured_steps_leave_the_first_out_and_average_the_rest() -> None:
     assert means == pytest.approx(measured(2.5, 5.0, 7.5, 17.5))
     assert measured_step(rows, skip=0) == (3, pytest.approx(measured(2.0, 4.0, 6.0, 14.0)))
     assert measured_step([row(1, "system/step_s", 1.0)]) == (0, {})
+
+
+# --- added in m3s11: a warm start's step, train alone ---------------------------------------
+
+
+def warm_start(train: float) -> StepPrediction:
+    """A warm start's step: a train phase alone."""
+    phase = PhaseTime(by_bound={"compute": train}, by_class={"gemm": train}, flops=0.0)
+    return StepPrediction(hardware="cpu", phases={"train": phase})
+
+
+def test_a_warm_start_is_checked_on_its_train_phase_and_step() -> None:
+    check = check_step("w", warm_start(0.6), 9, {"train": 0.5, "step": 0.8, "generate": 1.0})
+    assert check.measured == {"train": 0.5, "step": 0.8}  # only the parts it predicts
+    assert check.errors == pytest.approx({"train": 0.2, "step": -0.25})
+    with pytest.raises(ValueError, match="w: no measured step"):
+        check_step("w", warm_start(0.6), 9, {"train": 0.5})
+
+
+def test_each_part_is_summed_up_over_the_runs_that_time_it() -> None:
+    rl = check_step("a", predicted(0.3, 0.2, 0.6), 9, measured(0.4, 0.2, 0.5, 1.0))
+    warm = check_step("w", warm_start(0.6), 9, {"train": 0.5, "step": 0.8})
+    summary = summarize([rl, warm])
+    samples = {part: errors.samples for part, errors in summary.items()}
+    assert samples == {"generate": 1, "logprobs": 1, "train": 2, "step": 2}
+    assert summary["step"].mape == pytest.approx(0.175)  # step: +10% and -25%
+    assert list(summarize([warm])) == ["train", "step"]

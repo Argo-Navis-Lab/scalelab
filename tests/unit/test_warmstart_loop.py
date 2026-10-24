@@ -1,6 +1,7 @@
 """Warm-start loop tests: the learning-rate schedule, the optimizer, the budget, the FLOP
-ledger and the final checkpoint."""
+ledger, the final checkpoint and the step times."""
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ from scalelab.models.transformer import Transformer
 from scalelab.rl.warmstart import make_batch, sample_examples
 from scalelab.rl.warmstart_loop import StepMetrics, learning_rate, make_optimizer, warm_start
 from scalelab.tasks.arithmetic import ArithmeticTask
+from scalelab.telemetry.sink import MetricsSink, read_metrics
 
 TASK = ArithmeticTask()
 TINY = ModelConfig(name="tiny", n_layers=2, d_model=64, n_heads=1)
@@ -142,3 +144,20 @@ def test_the_last_step_is_always_saved(tmp_path: Path):
     assert (state["tokens"], state["flops"]) == (metrics[-1].tokens, metrics[-1].flops)
     for name, tensor in model.state_dict().items():
         assert torch.equal(state["model"][name], tensor), name
+
+
+# --- added in m3s11: the step times ---------------------------------------------------------
+
+
+def test_with_a_sink_each_step_records_its_laps_and_saving_writes_them(tmp_path: Path):
+    sink = MetricsSink(tmp_path, "run", every_seconds=math.inf)  # it writes when saving alone
+    ckpt = tmp_path / "ckpt"
+    metrics = warm_start(
+        make(), TASK, [2], SMALL, np.random.default_rng(0), ckpt, tmp_path, sink=sink
+    )
+    rows = read_metrics(tmp_path, "run")  # on disk: the last step's save wrote them
+    for m in metrics:
+        laps = {row.metric: row.value for row in rows if row.step == m.step}
+        assert laps.keys() == {"system/data_s", "system/train_s", "system/step_s"}
+        assert 0 < laps["system/data_s"] + laps["system/train_s"] <= laps["system/step_s"]
+    assert metrics == train(tmp_path / "plain")[1]  # timing changes nothing about training

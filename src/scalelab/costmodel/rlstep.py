@@ -1,5 +1,6 @@
 """How long a whole RL step takes, phase by phase: the work the loop does, as op graphs timed on
-a device, with answers as long as a model has been seen to write them."""
+a device, with answers as long as a model has been seen to write them; and a warm start's step,
+which is a train phase alone."""
 
 import math
 from bisect import bisect_right
@@ -98,7 +99,7 @@ class PhaseTime(StrictModel):
 
 
 class StepPrediction(StrictModel):
-    """A whole RL step's expected time on one device, phase by phase."""
+    """A whole step's expected time on one device, phase by phase (a warm start's: train)."""
 
     hardware: str
     phases: dict[Phase, PhaseTime]
@@ -212,3 +213,35 @@ def predict_rl_step(
         "train": train.phase(),
     }
     return StepPrediction(hardware=hardware.name, phases=phases)
+
+
+class WarmStartStepSpec(StrictModel):
+    """One warm-start step's work (m3s11): batch_size worked examples side by side, each as many
+    tokens long (prompt, answer, <eos>) as one of `lengths`, all equally likely."""
+
+    lengths: tuple[int, ...] = Field(min_length=1)
+    batch_size: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def check_lengths(self) -> "WarmStartStepSpec":
+        if min(self.lengths) < 2:
+            raise ValueError("an example has at least 2 tokens: one read, the next predicted")
+        return self
+
+
+def predict_warm_start_step(
+    model: ModelSpec,
+    step: WarmStartStepSpec,
+    hardware: HardwareSpec,
+    efficiencies: Mapping[Group, Efficiency] | None = None,
+) -> StepPrediction:
+    """A warm-start step's expected time: one forward and backward pass over the batch padded to
+    its longest example, every token read but the last (each width weighted by its chance, as
+    RL's training is), then one update. Drawing the problems is CPU time the model leaves out."""
+    train = _Tally()
+    for width, chance in longest([step.lengths] * step.batch_size).items():
+        if chance > 0:  # widths it can't be need no timing
+            workload = WorkloadSpec(phase="train", batch=step.batch_size, tokens=width - 1)
+            train.add(time_ops(op_graph(model, workload), hardware, efficiencies), chance)
+    train.add(time_ops(optimizer_ops(model), hardware, efficiencies))
+    return StepPrediction(hardware=hardware.name, phases={"train": train.phase()})

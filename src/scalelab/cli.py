@@ -52,7 +52,7 @@ from scalelab.costmodel.roofline import Efficiency, Group
 from scalelab.costmodel.specs import CPU, HARDWARE, HardwareSpec
 from scalelab.costmodel.validate import PARTS, TARGET_MAPE, StepCheck, check_step, summarize
 from scalelab.models.transformer import Transformer
-from scalelab.rl.costing import measured_step, predict_rl_run
+from scalelab.rl.costing import measured_step, predict_rl_run, predict_step
 from scalelab.rl.evaluation import EvalResult, SampledResult
 from scalelab.rl.experiment import (
     grade_by_part,
@@ -269,9 +269,9 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
     if config.rl is not None:
         start = load_warm_start(config.rl.from_run, config.model, registry, home)
         print(f"warm start:    {config.rl.from_run}")
-        telemetry = metrics_folder(home, run_id) if runtime.telemetry else "off"  # m2s36
-        print(f"metrics:       {telemetry}")
         print(f"gradings:      {gradings_folder(home, run_id)}")  # m2s38
+    telemetry = metrics_folder(home, run_id) if runtime.telemetry else "off"  # m2s36
+    print(f"metrics:       {telemetry}")  # m3s11: a warm start's step times go there too
 
     # Speed is measured between gradings, from the time and the token (or FLOP) count at the
     # last one. A resumed run's count isn't known here, so its first grading shows none.
@@ -356,13 +356,14 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
         started = last_time = time.monotonic()  # the clock starts with training
         try:
             checkpoints = home / "checkpoints" / run_id
+            # What the collectors measure goes here (m2s36: unless telemetry is off), and a warm
+            # start's step times (m3s11)
+            sink = MetricsSink(home, run_id) if runtime.telemetry else None
             if start is None:
                 metrics = run_experiment(
-                    config, seed, checkpoints, home, policy, deterministic, report=report
+                    config, seed, checkpoints, home, policy, deterministic, report, sink
                 )
             else:
-                # What the collectors measure goes here (m2s36: unless telemetry is off)
-                sink = MetricsSink(home, run_id) if runtime.telemetry else None
                 metrics = run_rl_experiment(
                     config,
                     seed,
@@ -655,9 +656,10 @@ def ran_on(label: str, hardware_name: str) -> bool:
 
 
 def cost_validate(hardware_name: str) -> int:
-    """`scalelab cost validate`: the cost model's step against the steps RL runs on this
-    hardware measured (telemetry's laps, m2s29), phase by phase. Every whole step is held out:
-    the fit saw only single ops and decode steps (m3s7). Records nothing."""
+    """`scalelab cost validate`: the cost model's step against the steps runs on this hardware
+    measured (telemetry's laps: RL runs' since m2s29, warm starts' since m3s11), phase by phase.
+    Every whole step is held out: the fit saw only single ops and decode steps (m3s7). Records
+    nothing."""
     home = scalelab_home()
     hardware = hardware_spec(hardware_name)
     print(f"hardware:      {hardware_name}")
@@ -669,8 +671,8 @@ def cost_validate(hardware_name: str) -> int:
         for run in registry.list_runs():
             config_json = registry.experiment_json(run.config_hash)
             assert config_json is not None  # every run row points at an experiment row
-            if not ran_on(run.hardware, hardware_name) or json.loads(config_json).get("rl") is None:
-                continue  # another device, or a warm start
+            if not ran_on(run.hardware, hardware_name):
+                continue  # another device
             try:
                 config = ExperimentConfig.model_validate_json(config_json)
             except ValueError:  # recorded before a field was renamed or dropped
@@ -681,18 +683,21 @@ def cost_validate(hardware_name: str) -> int:
                 left_out += 1
                 continue
             if run.config_hash not in predictions:
-                predictions[run.config_hash] = predict_rl_run(config, hardware, efficiencies).step
+                predictions[run.config_hash] = predict_step(config, hardware, efficiencies)
             checks.append(check_step(run.run_id, predictions[run.config_hash], steps, measured))
     if not checks:
-        raise UsageError(f"no RL run on {hardware_name} timed its steps (telemetry does: m2s29)")
-    line = f"runs:          {len(checks)} RL runs timed their steps"
+        since = "RL runs time their steps since m2s29, warm starts since m3s11"
+        raise UsageError(f"no run on {hardware_name} timed its steps ({since})")
+    line = f"runs:          {len(checks)} runs timed their steps"
     if left_out:
         line += f" (left out {left_out}: no timed steps, or a config that no longer loads)"
     print(line)
     parts = "".join(f"{part:>10}" for part in PARTS)
     print(f"{'run':<30}{'steps':>6}{parts}  step, predicted vs measured")
     for check in checks:
-        errors = "".join(f"{check.errors[part]:>+10.1%}" for part in PARTS)
+        errors = "".join(  # m3s11: a warm start has train and step alone, blanks for the rest
+            f"{check.errors[part]:>+10.1%}" if part in check.errors else " " * 10 for part in PARTS
+        )
         step = f"{check.predicted['step']:.3f} s vs {check.measured['step']:.3f} s"
         print(f"{check.run_id:<30}{check.steps:6d}{errors}  {step}")
     summary = summarize(checks)

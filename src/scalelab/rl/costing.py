@@ -1,5 +1,6 @@
-"""What an RL experiment asks of the cost model: its step, built from its config the way the loop
-runs it, and its whole run: how many steps the FLOPs budget buys and how long they take."""
+"""What an experiment asks of the cost model: an RL experiment's step, built from its config the
+way the loop runs it, and its whole run: how many steps the FLOPs budget buys and how long they
+take; a warm start's step, built the same way."""
 
 import math
 import statistics
@@ -9,12 +10,19 @@ from collections.abc import Iterable, Mapping
 import numpy as np
 
 from scalelab.core.config import ExperimentConfig, StrictModel
-from scalelab.costmodel.rlstep import RLStepSpec, StepPrediction, predict_rl_step
+from scalelab.costmodel.rlstep import (
+    RLStepSpec,
+    StepPrediction,
+    WarmStartStepSpec,
+    predict_rl_step,
+    predict_warm_start_step,
+)
 from scalelab.costmodel.roofline import Efficiency, Group
 from scalelab.costmodel.specs import HardwareSpec, ModelSpec
 from scalelab.costmodel.validate import PARTS
 from scalelab.rl.experiment import make_task
 from scalelab.rl.loop import GENERATION_BATCH, sample_problems
+from scalelab.rl.warmstart import sample_examples
 from scalelab.tasks.tokenizer import encode
 from scalelab.telemetry.sink import MetricRow
 
@@ -91,3 +99,32 @@ def measured_step(
             seconds[TIMED[row.metric]].append(row.value)
     means = {part: statistics.fmean(values) for part, values in seconds.items()}
     return len(seconds.get("step", [])), means
+
+
+def warm_start_step_spec(config: ExperimentConfig) -> WarmStartStepSpec:
+    """A warm start's step as the cost model sees it (m3s11): its batch, and how long examples
+    are: ANSWER_SAMPLES worked examples per difficulty, drawn as the loop draws them (without
+    skipping the eval sets' prompts, as the loop does: they are as long as the rest)."""
+    if config.rl is not None:
+        raise ValueError(f"{config.name} is an RL experiment: its steps are RL steps")
+    task, _ = make_task(config.task.name, config.task.ops)
+    difficulties = config.task.difficulties
+    count = ANSWER_SAMPLES * len(difficulties)
+    rng = np.random.default_rng(SPEC_SEED)
+    examples = sample_examples(task, rng, count, difficulties, config.model.context)
+    return WarmStartStepSpec(
+        lengths=tuple(len(example.prompt) + len(example.answer) for example in examples),
+        batch_size=config.warm_start.batch_size,
+    )
+
+
+def predict_step(
+    config: ExperimentConfig,
+    hardware: HardwareSpec,
+    efficiencies: Mapping[Group, Efficiency] | None = None,
+) -> StepPrediction:
+    """Any experiment's expected step on `hardware`: an RL step, or a warm start's (m3s11)."""
+    if config.rl is not None:
+        return predict_rl_run(config, hardware, efficiencies).step
+    model = ModelSpec.from_config(config.model)
+    return predict_warm_start_step(model, warm_start_step_spec(config), hardware, efficiencies)

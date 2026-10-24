@@ -22,6 +22,8 @@ from scalelab.costmodel.specs import ModelSpec, WorkloadSpec
 from scalelab.models.transformer import Transformer
 from scalelab.rl.warmstart import make_batch, sample_examples, warm_start_loss
 from scalelab.tasks.base import Task
+from scalelab.telemetry.sink import MetricsSink
+from scalelab.telemetry.timing import StepTimer
 
 BETAS = (0.9, 0.95)  # how fast Adam's running averages forget, as in GPT-3
 
@@ -70,6 +72,7 @@ def warm_start[P](
     excluded: frozenset[tuple[int, ...]] = frozenset(),
     stop_after: int | None = None,
     on_step: Callable[[StepMetrics], None] | None = None,
+    sink: MetricsSink | None = None,
 ) -> list[StepMetrics]:
     """Train `model` on worked solutions until config.tokens positions have been read,
     resuming from the latest checkpoint in `checkpoint_dir` if there is one.
@@ -77,7 +80,8 @@ def warm_start[P](
     Returns the metrics of every step this call ran. Saving follows `policy` (by default:
     every 15 minutes, keeping 2), and the last step is always saved, because its weights are
     what RL will start from. `stop_after=k` pretends the job is interrupted after step k.
-    `on_step`, if given, is called with each step's metrics before any saving.
+    `on_step`, if given, is called with each step's metrics before any saving. With a `sink`,
+    each step's laps go there as RL's telemetry names them: system/data_s, train_s, step_s.
     """
     policy = policy or CheckpointPolicy()
     optimizer = make_optimizer(model, config)
@@ -96,7 +100,9 @@ def warm_start[P](
 
     context = model.config.context
     metrics: list[StepMetrics] = []
+    timer = StepTimer(device)  # m3s11: CUDA-synced laps, as in RL (m2s29)
     while tokens < config.tokens:
+        timer.start()
         batch = make_batch(
             sample_examples(task, data_rng, config.batch_size, difficulties, context, excluded)
         )
@@ -107,12 +113,14 @@ def warm_start[P](
         lr = learning_rate(config, min(1.0, tokens / config.tokens))
         for group in optimizer.param_groups:
             group["lr"] = lr
+            timer.lap("data")  # drawing the problems, the batch, the bookkeeping
 
         loss = warm_start_loss(model(batch.inputs.to(device)), batch.targets.to(device))
         optimizer.zero_grad()
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
         optimizer.step()
+        timer.lap("train")  # forward, backward, clipping, the update
         metrics.append(
             StepMetrics(
                 step=step,
@@ -123,6 +131,10 @@ def warm_start[P](
                 grad_norm=grad_norm.item(),
             )
         )
+        if sink is not None:  # m3s11: before grading, so a step's time leaves grading out
+            for phase, seconds in timer.phases.items():
+                sink.record(step, f"system/{phase}_s", seconds)
+            sink.record(step, "system/step_s", timer.seconds())
         if on_step is not None:
             on_step(metrics[-1])
         if step == stop_after:
@@ -136,6 +148,8 @@ def warm_start[P](
                 "tokens": tokens,
                 "flops": flops,
             }
+            if sink is not None:
+                sink.flush()  # first, so every step a checkpoint keeps has its rows on disk
             save_checkpoint(checkpoint_dir, step, state, home)
             prune_checkpoints(checkpoint_dir, policy.keep, home)
             policy.saved()

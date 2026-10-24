@@ -12,7 +12,8 @@ TARGET_MAPE = 0.15  # M3's exit: whole steps within 15% on average
 
 
 class StepCheck(StrictModel):
-    """One run's steps: the predicted and the measured seconds a step, for each part."""
+    """One run's steps: the predicted and the measured seconds a step, for each part it has (a
+    warm start's: train and step, m3s11)."""
 
     run_id: str
     steps: int  # how many measured steps the measured means cover
@@ -22,32 +23,35 @@ class StepCheck(StrictModel):
     @property
     def errors(self) -> dict[str, float]:
         """Each part's error, predicted / measured - 1: below 0, the model runs fast."""
-        return {part: self.predicted[part] / self.measured[part] - 1 for part in PARTS}
+        return {part: self.predicted[part] / self.measured[part] - 1 for part in self.predicted}
 
 
 def check_step(
     run_id: str, prediction: StepPrediction, steps: int, measured: Mapping[str, float]
 ) -> StepCheck:
-    """A run's measured seconds a step (every part in PARTS) against its predicted step. The
-    measured step also holds what the model leaves out: drawing problems, scoring, telemetry."""
-    missing = sorted(set(PARTS) - set(measured))
-    if missing:
-        raise ValueError(f"{run_id}: no measured {', '.join(missing)}")
+    """A run's measured seconds a step (each phase the prediction has, then the step) against
+    its predicted step. The measured step also holds what the model leaves out: drawing
+    problems, scoring, telemetry."""
     predicted = {name: phase.seconds for name, phase in prediction.phases.items()}
     predicted["step"] = prediction.seconds
+    missing = sorted(set(predicted) - set(measured))
+    if missing:
+        raise ValueError(f"{run_id}: no measured {', '.join(missing)}")
     return StepCheck(
         run_id=run_id,
         steps=steps,
         predicted=predicted,
-        measured={part: measured[part] for part in PARTS},
+        measured={part: measured[part] for part in predicted},
     )
 
 
 def summarize(checks: Sequence[StepCheck]) -> dict[str, Errors]:
-    """Each part's MAPE, bias and worst error over the runs (at least one), each run once."""
-    return {
-        part: errors_between(
-            [check.predicted[part] for check in checks], [check.measured[part] for check in checks]
-        )
-        for part in PARTS
-    }
+    """Each part's MAPE, bias and worst error over the runs that have it (generate and logprobs:
+    RL runs alone), each run once. A part no run has is left out."""
+    summary: dict[str, Errors] = {}
+    for part in PARTS:
+        timed = [check for check in checks if part in check.predicted]
+        if timed:
+            predicted = [check.predicted[part] for check in timed]
+            summary[part] = errors_between(predicted, [check.measured[part] for check in timed])
+    return summary

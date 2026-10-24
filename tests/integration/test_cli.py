@@ -17,7 +17,7 @@ from scalelab.core.envcapture import EnvInfo
 from scalelab.core.registry import Registry
 from scalelab.costmodel.specs import CPU
 from scalelab.costmodel.validate import PARTS, check_step
-from scalelab.rl.costing import measured_step, predict_rl_run
+from scalelab.rl.costing import measured_step, predict_rl_run, predict_step
 from scalelab.rl.gradings import load_gradings
 from scalelab.telemetry.sink import metrics_folder, read_metrics
 
@@ -276,7 +276,7 @@ def test_with_telemetry_off_an_rl_run_records_no_metrics(
     off = ["runtime.telemetry=false", f"rl.from_run={warm_start}"]
     assert main(["run", str(RL), *SMALL_RL, *off]) == 0
     assert "metrics:       off" in capsys.readouterr().out
-    assert not (home / "metrics").exists()
+    assert [folder.name for folder in (home / "metrics").iterdir()] == [warm_start]  # m3s11
 
 
 def test_overhead_times_the_steps_without_and_with_telemetry_and_records_nothing(
@@ -361,7 +361,7 @@ def test_report_gains_pairs_the_seeds_of_each_rl_experiment(
 # --- added in m3s10: the cost model's steps against the steps RL runs timed -----------------
 
 
-def test_cost_validate_checks_each_rl_run_that_timed_its_steps(
+def test_cost_validate_checks_each_run_that_timed_its_steps(
     home: Path, capsys: pytest.CaptureFixture[str]
 ):
     warm_start = warm_started(home)
@@ -370,20 +370,25 @@ def test_cost_validate_checks_each_rl_run_that_timed_its_steps(
     assert main(["run", str(RL), *rl, "seed=1", "runtime.telemetry=false"]) == 0
     capsys.readouterr()
     assert main(["cost", "validate", "--hardware", "t4"]) == 2
-    assert "no RL run on t4 timed its steps" in capsys.readouterr().err
+    assert "no run on t4 timed its steps" in capsys.readouterr().err
     assert main(["cost", "validate", "--hardware", "cpu"]) == 0
     out = capsys.readouterr().out
     (timed,) = [
         run.run_id
         for run in Registry.sqlite(home / "registry.db").list_runs()
-        if metrics_folder(home, run.run_id).is_dir()
+        if run.run_id != warm_start and metrics_folder(home, run.run_id).is_dir()
     ]
     steps, measured = measured_step(read_metrics(home, timed))
     assert steps >= 1
     check = check_step(timed, predict_rl_run(load_config(RL, rl), CPU).step, steps, measured)
     assert "calibration:   none, so the datasheet's peaks" in out
-    assert "runs:          1 RL runs timed their steps (left out 1: no timed steps" in out
+    assert "runs:          2 runs timed their steps (left out 1: no timed steps" in out
     errors = "".join(f"{check.errors[part]:>+10.1%}" for part in PARTS)
     assert f"{timed:<30}{steps:6d}{errors}  {check.predicted['step']:.3f} s vs " in out
-    mape = f"{abs(check.errors['step']):.1%}"
+    # m3s11: the warm start timed its steps too, and is checked on train and step alone
+    steps, measured = measured_step(read_metrics(home, warm_start))
+    warm = check_step(warm_start, predict_step(load_config(HELLO, SMALL), CPU), steps, measured)
+    errors = " " * 20 + "".join(f"{warm.errors[part]:>+10.1%}" for part in ("train", "step"))
+    assert f"{warm_start:<30}{steps:6d}{errors}  {warm.predicted['step']:.3f} s vs " in out
+    mape = f"{(abs(check.errors['step']) + abs(warm.errors['step'])) / 2:.1%}"
     assert f"verdict:       step MAPE {mape}, " in out

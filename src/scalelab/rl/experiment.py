@@ -110,6 +110,7 @@ def run_experiment(
     policy: CheckpointPolicy | None = None,
     deterministic: bool | None = None,
     report: Report | None = None,
+    sink: MetricsSink | None = None,
 ) -> list[StepMetrics]:
     """Warm-start the config's model on its task, resuming from the latest checkpoint in
     `checkpoint_dir` if there is one. Returns the metrics of every step this call ran.
@@ -117,7 +118,8 @@ def run_experiment(
     The seed's "init" stream picks the starting weights and its "data" stream the training
     problems. The model trains on the GPU when there is one, otherwise on the CPU. With a
     `report`, the model is graded every config.eval.every steps and after the last one, and
-    each grading goes to `report`. Grading changes nothing about training.
+    each grading goes to `report`. Grading changes nothing about training. Each step's laps
+    go to `sink`, if there is one (m3s11).
     """
     seeds = seed_everything(seed, deterministic)  # PyTorch's generator now follows seeds.init
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -143,6 +145,7 @@ def run_experiment(
         policy,
         eval_prompts(task, problem_type),
         on_step=grade,
+        sink=sink,
     )
 
 

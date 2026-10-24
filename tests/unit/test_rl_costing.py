@@ -6,10 +6,18 @@ import numpy as np
 import pytest
 
 from scalelab.core.config import ExperimentConfig, load_config
-from scalelab.costmodel.specs import CPU
-from scalelab.rl.costing import ANSWER_SAMPLES, predict_rl_run, rl_step_spec
+from scalelab.costmodel.rlstep import predict_warm_start_step
+from scalelab.costmodel.specs import CPU, ModelSpec
+from scalelab.rl.costing import (
+    ANSWER_SAMPLES,
+    predict_rl_run,
+    predict_step,
+    rl_step_spec,
+    warm_start_step_spec,
+)
 from scalelab.rl.experiment import make_task
 from scalelab.rl.loop import GENERATION_BATCH, sample_problems
+from scalelab.rl.warmstart import sample_examples
 from scalelab.tasks.tokenizer import encode
 
 EXPERIMENTS = Path(__file__).resolve().parents[2] / "configs" / "experiments"
@@ -58,3 +66,28 @@ def test_the_budget_buys_whole_steps_and_max_steps_can_stop_sooner() -> None:
     assert (run.budget_steps, run.steps) == (11, 3)
     assert run.step == step  # the budget sets how many steps, not what a step is
     assert run.seconds == pytest.approx(3 * step.seconds)
+
+
+# --- added in m3s11: a warm start's step ----------------------------------------------------
+
+
+def test_a_warm_start_step_is_its_batch_of_the_loops_worked_examples() -> None:
+    config = load_config(EXPERIMENTS / "warmstart.yaml", ["task.difficulties=[2, 3]"])
+    spec = warm_start_step_spec(config)
+    assert spec.batch_size == config.warm_start.batch_size == 64
+    task, _ = make_task(config.task.name, config.task.ops)
+    rng = np.random.default_rng(0)
+    examples = sample_examples(task, rng, 2 * ANSWER_SAMPLES, [2, 3], config.model.context)
+    assert spec.lengths == tuple(len(e.prompt) + len(e.answer) for e in examples)
+    assert warm_start_step_spec(config) == spec  # drawn from their own generator: always the same
+
+
+def test_either_kind_of_experiment_has_a_step() -> None:
+    warm = load_config(EXPERIMENTS / "warmstart.yaml", ["task.difficulties=[2]"])
+    step = predict_step(warm, CPU)
+    model = ModelSpec.from_config(warm.model)
+    assert step == predict_warm_start_step(model, warm_start_step_spec(warm), CPU)
+    assert list(step.phases) == ["train"]
+    assert predict_step(rl_config(), CPU) == predict_rl_run(rl_config(), CPU).step
+    with pytest.raises(ValueError, match="is an RL experiment"):
+        warm_start_step_spec(rl_config())

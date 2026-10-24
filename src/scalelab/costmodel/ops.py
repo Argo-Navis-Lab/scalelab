@@ -99,7 +99,7 @@ class Op(StrictModel):
         return self.flops / (self.bytes_read + self.bytes_written)
 
 
-def _matmul(name: str, layer: int, rows: int, inner: int, cols: int, op_class: OpClass) -> Op:
+def matmul_op(name: str, layer: int, rows: int, inner: int, cols: int, op_class: OpClass) -> Op:
     """(rows × inner) @ (inner × cols): reads both matrices, writes the rows × cols result."""
     return Op(
         name=name,
@@ -122,11 +122,11 @@ class _Ops:
         self, name: str, layer: int, rows: int, inner: int, cols: int, kind: OpClass
     ) -> None:
         """Activations (rows × inner) times a weight matrix (inner × cols)."""
-        self.forward.append(_matmul(name, layer, rows, inner, cols, kind))
+        self.forward.append(matmul_op(name, layer, rows, inner, cols, kind))
         # The gradient goes back through two matmuls of the same size, so backward costs twice
         # the forward: the weight's (inputs transposed @ dY) and the input's (dY @ W transposed).
-        self.backward.append(_matmul(f"{name}.grad_weight", layer, inner, rows, cols, "gemm"))
-        self.backward.append(_matmul(f"{name}.grad_input", layer, rows, cols, inner, "gemm"))
+        self.backward.append(matmul_op(f"{name}.grad_weight", layer, inner, rows, cols, "gemm"))
+        self.backward.append(matmul_op(f"{name}.grad_input", layer, rows, cols, inner, "gemm"))
 
     def other(
         self,

@@ -12,7 +12,7 @@ from scalelab.costmodel.specs import ModelSpec
 
 # Tokens in a matmul's activations: prefill, log-prob and training passes, from a batch of
 # prompts up to a micro-batch of whole sequences (64 × 256). Decoding's matmuls, one token a
-# sequence, belong to the decode-step bench (m3s4).
+# sequence, belong to the decode-step bench (m3s5).
 ROWS = (1024, 4096, 16384)
 
 Shape = tuple[int, int, int]  # (rows, inner, cols): (rows × inner) @ (inner × cols)

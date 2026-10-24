@@ -63,7 +63,7 @@ Dtype = Literal["fp32", "fp16", "bf16"]
 class HardwareSpec(StrictModel):
     """A device, as the cost model sees it (Section 5.1): its memory, its peak arithmetic
     speed and its memory bandwidth. Values come from vendor datasheets, so treat them as
-    values to verify, not gospel: how close real kernels get is calibration's job (m3s6)."""
+    values to verify, not gospel: how close real kernels get is calibration's job (m3s7)."""
 
     name: str
     memory_bytes: int = Field(gt=0)  # the device's own memory (HBM or GDDR)

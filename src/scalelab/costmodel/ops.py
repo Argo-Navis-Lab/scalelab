@@ -70,7 +70,7 @@ def count_flops(model: ModelSpec, workload: WorkloadSpec) -> FlopCounts:
 
 # --- the op graph (m3s1) ---------------------------------------------------------------------
 
-# Every run so far is float32: 4 bytes a value. fp16 (m3s14) will need more than one number
+# Every run so far is float32: 4 bytes a value. fp16 (m3s15) will need more than one number
 # (autocast keeps the norms in float32), so there is no dtype choice yet.
 VALUE_BYTES = 4
 ID_BYTES = 8  # a token id (int64)
@@ -111,6 +111,20 @@ def matmul_op(name: str, layer: int, rows: int, inner: int, cols: int, op_class:
     )
 
 
+def grad_op(op: Op) -> Op:
+    """A rule of thumb for the gradient of an op that isn't a matmul: it reads what the op read
+    and the gradient of what it wrote, writes a gradient for everything it read, and does twice
+    the FLOPs."""
+    return Op(
+        name=f"{op.name}.grad",
+        layer=op.layer,
+        op_class=op.op_class,
+        flops=2 * op.flops,
+        bytes_read=op.bytes_read + op.bytes_written,
+        bytes_written=op.bytes_read,
+    )
+
+
 class _Ops:
     """A forward pass's ops as they are added, and the backward pass's that go with them."""
 
@@ -138,28 +152,16 @@ class _Ops:
         flops: int = 0,
     ) -> None:
         """Any other op: `read` bytes in, `written` bytes out."""
-        self.forward.append(
-            Op(
-                name=name,
-                layer=layer,
-                op_class=kind,
-                flops=flops,
-                bytes_read=read,
-                bytes_written=written,
-            )
+        op = Op(
+            name=name,
+            layer=layer,
+            op_class=kind,
+            flops=flops,
+            bytes_read=read,
+            bytes_written=written,
         )
-        # A rule of thumb for its gradient: it reads what the op read and the gradient of what
-        # it wrote, writes a gradient for everything it read, and does twice the FLOPs.
-        self.backward.append(
-            Op(
-                name=f"{name}.grad",
-                layer=layer,
-                op_class=kind,
-                flops=2 * flops,
-                bytes_read=read + written,
-                bytes_written=read,
-            )
-        )
+        self.forward.append(op)
+        self.backward.append(grad_op(op))
 
 
 def op_graph(model: ModelSpec, workload: WorkloadSpec) -> list[Op]:

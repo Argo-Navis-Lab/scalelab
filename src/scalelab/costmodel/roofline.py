@@ -18,12 +18,12 @@ from scalelab.costmodel.specs import Dtype, HardwareSpec, ModelSpec, WorkloadSpe
 # compute: arithmetic sets the op's time. memory: moving its bytes does. launch: the fixed
 # cost of starting it is bigger than both (tiny ops).
 Bound = Literal["compute", "memory", "launch"]
-DTYPE: Dtype = "fp32"  # the op graph counts 4-byte values (VALUE_BYTES); fp16 joins at m3s14
+DTYPE: Dtype = "fp32"  # the op graph counts 4-byte values (VALUE_BYTES); fp16 joins at m3s15
 
 
 class Efficiency(StrictModel):
     """How close one class of op gets to the datasheet: the fractions of peak FLOP/s and of
-    bandwidth it reaches, and a fixed cost per op. Calibration fits these (m3s6)."""
+    bandwidth it reaches, and a fixed cost per op. Calibration fits these (m3s7)."""
 
     compute: float = Field(default=1.0, gt=0, le=1)  # η_c
     memory: float = Field(default=1.0, gt=0, le=1)  # η_m

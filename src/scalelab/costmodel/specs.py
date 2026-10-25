@@ -31,6 +31,11 @@ class ParamCounts(StrictModel):
         return self.embedding + self.non_embedding + self.head
 
 
+# m3s18: the number format a workload's matmuls and attention run in: float32, or float16 under
+# autocast (the weights stay float32, cast as they are used). bf16 joins when a study needs it.
+Precision = Literal["fp32", "fp16"]
+
+
 class WorkloadSpec(StrictModel):
     """What the model is asked to do, in a shape the cost model can count (Section 5.1).
 
@@ -44,6 +49,7 @@ class WorkloadSpec(StrictModel):
     tokens: int = Field(gt=0)  # new tokens per sequence
     past: int = Field(default=0, ge=0)  # tokens already in the KV cache (decode only)
     activation_ckpt: bool = False  # training only: redo the forward pass to save memory
+    precision: Precision = "fp32"  # m3s18
 
     @model_validator(mode="after")
     def check_phase(self) -> "WorkloadSpec":

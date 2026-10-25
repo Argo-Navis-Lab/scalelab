@@ -13,12 +13,11 @@ from pydantic import Field
 
 from scalelab.core.config import StrictModel
 from scalelab.costmodel.ops import Op, OpClass, op_graph
-from scalelab.costmodel.specs import Dtype, HardwareSpec, ModelSpec, WorkloadSpec
+from scalelab.costmodel.specs import HardwareSpec, ModelSpec, WorkloadSpec
 
 # compute: arithmetic sets the op's time. memory: moving its bytes does. launch: the fixed
 # cost of starting it is bigger than both (tiny ops).
 Bound = Literal["compute", "memory", "launch"]
-DTYPE: Dtype = "fp32"  # the op graph counts 4-byte values (VALUE_BYTES); fp16 joins at m3s15
 
 
 class Efficiency(StrictModel):
@@ -39,6 +38,9 @@ Group = Literal[
     "gemm",
     "gemv-decode",
     "attention",
+    "gemm.fp16",
+    "gemv-decode.fp16",
+    "attention.fp16",
     "copy",
     "norm",
     "norm.grad",
@@ -52,6 +54,7 @@ Group = Literal[
 KINDS: dict[str, Group] = {
     "copy": "copy",
     "embed": "copy",
+    "cast": "copy",  # m3s18: autocast's float32 -> float16 copies ("cast attn.q")
     "attn.cache": "copy",
     "norm": "norm",
     "attn_norm": "norm",
@@ -70,16 +73,24 @@ KINDS: dict[str, Group] = {
     "optim.clip_norm": "copy",  # m3s8: the update streams every weight through memory as a copy
     "optim.clip_scale": "copy",  # does (no bench of its own)
     "optim.adamw": "copy",
+    "optim.unscale": "copy",  # m3s18: GradScaler's pass over every gradient
 }
 # Backward kernels unlike their forward ones get an efficiency of their own. A residual add's
 # gradient is an add like the forward; the embedding's is a scatter, about a copy.
 BACKWARD: dict[Group, Group] = {"norm": "norm.grad", "rope": "rope.grad", "act": "act.grad"}
+# m3s18: tensor cores reach other fractions of another peak, so fp16 matmuls and attention get
+# efficiencies of their own; elementwise kernels move their bytes alike in either format.
+HALF: dict[OpClass, Group] = {
+    "gemm": "gemm.fp16",
+    "gemv-decode": "gemv-decode.fp16",
+    "attention": "attention.fp16",
+}
 
 
 def group(op: Op) -> Group:
     """Which efficiency times this op: its class, or for an elementwise op its kind."""
     if op.op_class != "elementwise":
-        return op.op_class
+        return HALF[op.op_class] if op.dtype == "fp16" else op.op_class
     forward = op.name.removesuffix(".grad")
     kind = KINDS[forward.split(" ")[0]]  # "attn_norm", or a benchmark's "norm 1024x128"
     return BACKWARD.get(kind, kind) if forward != op.name else kind
@@ -110,10 +121,10 @@ class OpTime(StrictModel):
 
 
 def op_time(op: Op, hardware: HardwareSpec, efficiency: Efficiency = IDEAL) -> OpTime:
-    """t_op = max(F / (P η_c), M / (B η_m)) + t_launch."""
+    """t_op = max(F / (P η_c), M / (B η_m)) + t_launch, with P the peak of the op's format."""
     return OpTime(
         op=op,
-        compute_s=op.flops / (hardware.peak_flops[DTYPE] * efficiency.compute),
+        compute_s=op.flops / (hardware.peak_flops[op.dtype] * efficiency.compute),
         memory_s=(op.bytes_read + op.bytes_written) / (hardware.memory_bw * efficiency.memory),
         launch_s=efficiency.launch_s,
     )

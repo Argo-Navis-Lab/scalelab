@@ -21,7 +21,7 @@ from scalelab.costmodel.calibrate import (
     save_calibration,
 )
 from scalelab.costmodel.ops import Op, grad_op, matmul_op, op_graph
-from scalelab.costmodel.roofline import Efficiency, Group, group, time_ops
+from scalelab.costmodel.roofline import HALF, Efficiency, Group, group, time_ops
 from scalelab.costmodel.specs import HARDWARE, ModelSpec, WorkloadSpec
 
 HELLO = Path(__file__).resolve().parents[2] / "configs" / "experiments" / "hello.yaml"
@@ -72,7 +72,7 @@ def test_every_op_has_a_group_the_benchmarks_fit(overrides: list[str]) -> None:
     benched += [attention_op(case) for case in attention_cases([model])]
     benched += op_graph(model, decode(1, 15))  # a whole decode step
     fitted = {group(op) for op in benched}
-    assert fitted == set(GROUPS)
+    assert fitted == set(GROUPS) - set(HALF.values())  # fp16's benchmarks: m3s19
     assert needed <= fitted
 
 

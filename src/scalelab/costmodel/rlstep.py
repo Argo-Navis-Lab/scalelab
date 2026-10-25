@@ -14,7 +14,7 @@ from pydantic import Field, model_validator
 from scalelab.core.config import StrictModel
 from scalelab.costmodel.ops import VALUE_BYTES, Op, OpClass, op_graph
 from scalelab.costmodel.roofline import Bound, Efficiency, Group, Prediction, time_ops
-from scalelab.costmodel.specs import HardwareSpec, ModelSpec, WorkloadSpec
+from scalelab.costmodel.specs import HardwareSpec, ModelSpec, Precision, WorkloadSpec
 
 # The phases a step is timed in, named as telemetry's laps (m2s29). The data and score laps run
 # Python on the CPU, a few ms; syncing weights is free while the sampler IS the policy.
@@ -99,6 +99,7 @@ class RLStepSpec(StrictModel):
     epochs: int = Field(gt=0)
     reference: bool  # a KL penalty: the reference's log-probs are a second forward pass
     sort_rows: bool = False  # m3s15: the padding cut (see predict_rl_step)
+    precision: Precision = "fp32"  # m3s18
 
     @model_validator(mode="after")
     def check_answers(self) -> "RLStepSpec":
@@ -171,13 +172,16 @@ class _Tally:
         return PhaseTime(by_bound=self.by_bound, by_class=self.by_class, flops=self.flops)
 
 
-def optimizer_ops(model: ModelSpec) -> list[Op]:
+def optimizer_ops(model: ModelSpec, precision: Precision = "fp32") -> list[Op]:
     """What an update does once, after every micro-batch's backward pass (m3s1 left it to the
     step): clip_grad_norm_ reads every gradient for the norm, then scales them all; AdamW
     reads each weight, its gradient and both moments, and writes the weight and moments.
-    zero_grad only drops the gradients: no kernel. Filed under layer 0: they cover all."""
+    zero_grad only drops the gradients: no kernel. Filed under layer 0: they cover all. Under
+    fp16 (m3s18) GradScaler unscales every gradient first, checking for inf and NaN."""
     values = model.param_counts().total * VALUE_BYTES  # one number for every weight
     sizes = {"optim.clip_norm": (1, 0), "optim.clip_scale": (1, 1), "optim.adamw": (4, 3)}
+    if precision == "fp16":
+        sizes = {"optim.unscale": (1, 1)} | sizes
     return [
         Op(
             name=name,
@@ -203,8 +207,9 @@ def predict_rl_step(
     run on rows padded to their longest prompt + answer, weighted the same way: log-probs in
     one pass over every row, training micro_batch rows at a time as they come. Under the
     padding cut (sort_rows, m3s15) the rows are sorted by length first, and both run in
-    micro-batches."""
+    micro-batches. Under fp16 (m3s18) every op graph is autocast's."""
     timed: dict[WorkloadSpec, Prediction] = {}
+    p = step.precision
 
     def run(workload: WorkloadSpec) -> Prediction:  # each shape is timed once
         if workload not in timed:
@@ -223,21 +228,20 @@ def predict_rl_step(
         for size, widths in pieces:
             for width, chance in widths.items():
                 if chance > 0:  # widths it can't be need no timing
-                    workload = WorkloadSpec(phase=phase, batch=size, tokens=width - 1)
+                    workload = WorkloadSpec(phase=phase, batch=size, tokens=width - 1, precision=p)
                     tally.add(run(workload), weight * chance)
 
     rows = step.rows
     generate = _Tally()
     for chunk in decode_chunks(rows, step.generation_batch):
         n, prompt = len(chunk), rows[chunk[0]]
-        generate.add(run(WorkloadSpec(phase="prefill", batch=n, tokens=prompt)))
+        generate.add(run(WorkloadSpec(phase="prefill", batch=n, tokens=prompt, precision=p)))
         chances = longest([step.answer_lengths[prompt]] * n)
         running = 1.0  # the chance the longest answer is longer than j + 1 tokens
         for j in range(max(chances) - 1):  # the last token is never fed back
             running -= chances.get(j + 1, 0.0)
-            generate.add(
-                run(WorkloadSpec(phase="decode", batch=n, past=prompt + j, tokens=1)), running
-            )
+            decode = WorkloadSpec(phase="decode", batch=n, past=prompt + j, tokens=1, precision=p)
+            generate.add(run(decode), running)
 
     totals = [[length + n for n in step.answer_lengths[length]] for length in rows]
     if step.sort_rows:  # m3s15: the padding cut
@@ -252,7 +256,7 @@ def predict_rl_step(
 
     train = _Tally()
     passes(train, "train", train_pieces, weight=step.epochs)
-    train.add(time_ops(optimizer_ops(model), hardware, efficiencies), step.epochs)
+    train.add(time_ops(optimizer_ops(model, p), hardware, efficiencies), step.epochs)
 
     phases: dict[Phase, PhaseTime] = {
         "generate": generate.phase(),
@@ -269,6 +273,7 @@ class WarmStartStepSpec(StrictModel):
     lengths: tuple[int, ...] = Field(min_length=1)
     batch_size: int = Field(gt=0)
     micro_batch: int | None = Field(default=None, gt=0)  # m3s15: the padding cut
+    precision: Precision = "fp32"  # m3s18
 
     @model_validator(mode="after")
     def check_lengths(self) -> "WarmStartStepSpec":
@@ -296,6 +301,7 @@ def predict_warm_start_step(
             timed[workload] = time_ops(op_graph(model, workload), hardware, efficiencies)
         return timed[workload]
 
+    p = step.precision  # m3s18
     rows = [step.lengths] * step.batch_size
     if step.micro_batch is None:
         pieces = [(step.batch_size, longest(rows))]
@@ -305,6 +311,7 @@ def predict_warm_start_step(
     for size, widths in pieces:
         for width, chance in widths.items():
             if chance > 0:  # widths it can't be need no timing
-                train.add(run(WorkloadSpec(phase="train", batch=size, tokens=width - 1)), chance)
-    train.add(time_ops(optimizer_ops(model), hardware, efficiencies))
+                workload = WorkloadSpec(phase="train", batch=size, tokens=width - 1, precision=p)
+                train.add(run(workload), chance)
+    train.add(time_ops(optimizer_ops(model, p), hardware, efficiencies))
     return StepPrediction(hardware=hardware.name, phases={"train": train.phase()})

@@ -249,3 +249,37 @@ def test_a_warm_start_under_the_padding_cut_runs_sorted_micro_batches() -> None:
     update = time_ops(optimizer_ops(SPEC), T4).seconds
     expected = narrow * (163 + 1) / 256 + wide * (93 + 255) / 256 + update
     assert step.seconds == pytest.approx(expected, rel=1e-12)
+
+
+# --- fp16 (m3s18) ---------------------------------------------------------------------------
+
+
+def test_fp16_unscales_every_gradient_before_clipping() -> None:
+    plain, half = optimizer_ops(SPEC), optimizer_ops(SPEC, "fp16")
+    assert half[0].name == "optim.unscale"
+    assert half[1:] == plain
+    values = SPEC.param_counts().total * 4  # the gradients stay float32
+    assert (half[0].bytes_read, half[0].bytes_written) == (values, values)
+
+
+def test_an_fp16_step_runs_fp16_graphs() -> None:
+    step = _step(ANSWERS).model_copy(update={"precision": "fp16"})
+    phases = predict_rl_step(SPEC, step, T4).phases
+    logprobs = 2 * _seconds(WorkloadSpec(phase="prefill", batch=16, tokens=12, precision="fp16"))
+    assert phases["logprobs"].seconds == pytest.approx(logprobs, rel=1e-12)
+    micro_batches = _seconds(
+        WorkloadSpec(phase="train", batch=8, tokens=12, precision="fp16"),
+        WorkloadSpec(phase="train", batch=8, tokens=7, precision="fp16"),
+    )
+    update = time_ops(optimizer_ops(SPEC, "fp16"), T4).seconds
+    assert phases["train"].seconds == pytest.approx(micro_batches + update, rel=1e-12)
+    plain = predict_rl_step(SPEC, _step(ANSWERS), T4).phases
+    assert phases["generate"].seconds < plain["generate"].seconds  # ideal, so a lower bound
+
+
+def test_an_fp16_warm_start_step_is_an_fp16_train_pass_then_the_update() -> None:
+    step = WarmStartStepSpec(lengths=(9,), batch_size=4, precision="fp16")
+    train = predict_warm_start_step(SPEC, step, T4).phases["train"].seconds
+    update = time_ops(optimizer_ops(SPEC, "fp16"), T4).seconds
+    workload = WorkloadSpec(phase="train", batch=4, tokens=8, precision="fp16")
+    assert train == pytest.approx(_seconds(workload) + update, rel=1e-12)

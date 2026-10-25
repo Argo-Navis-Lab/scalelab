@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from scalelab.core.config import load_config
 from scalelab.costmodel.ops import Op, op_graph
-from scalelab.costmodel.roofline import IDEAL, Efficiency, Group, op_time, predict, time_ops
+from scalelab.costmodel.roofline import IDEAL, Efficiency, Group, group, op_time, predict, time_ops
 from scalelab.costmodel.specs import HARDWARE, HardwareSpec, ModelSpec, WorkloadSpec
 
 HELLO = Path(__file__).resolve().parents[2] / "configs" / "experiments" / "hello.yaml"
@@ -140,3 +140,28 @@ def test_fp32_decoding_at_a_big_batch_crosses_the_ridge(name: str):
     # 25 (but below fp16's 203); reading the KV cache stays memory-bound
     classes = predict(spec(name), decode(512), T4).by_class
     assert classes["gemv-decode"].bound == "compute" and classes["attention"].bound == "memory"
+
+
+# --- fp16 (m3s18) ---------------------------------------------------------------------------
+
+
+def test_an_fp16_op_runs_at_the_fp16_peak():
+    half = MATMUL.model_copy(update={"dtype": "fp16"})
+    assert op_time(half, T4).compute_s == pytest.approx(MATMUL.flops / 65e12)
+    assert op_time(MATMUL, T4).compute_s == pytest.approx(MATMUL.flops / 8.1e12)
+
+
+def test_fp16_matmuls_and_attention_have_efficiencies_of_their_own():
+    ops = op_graph(spec(), TRAIN.model_copy(update={"precision": "fp16"}))
+    assert {group(op) for op in ops if op.flops > 0} == {"gemm.fp16", "attention.fp16"}
+    assert {group(op) for op in ops if op.name.startswith("cast ")} == {"copy"}
+    every: dict[Group, Efficiency] = dict.fromkeys(get_args(Group), IDEAL)
+    slow = time_ops(ops, T4, {**every, "gemm": Efficiency(compute=0.5)})
+    assert slow == time_ops(ops, T4)  # float32's gemm efficiency times no fp16 op
+
+
+@pytest.mark.parametrize("name", LADDER)
+def test_ideal_fp16_training_gains_less_than_the_peaks_ratio(name: str):
+    fp32 = predict(spec(name), TRAIN, T4).seconds
+    fp16 = predict(spec(name), TRAIN.model_copy(update={"precision": "fp16"}), T4).seconds
+    assert 1 < fp32 / fp16 < 65e12 / 8.1e12  # the casts and float32 ops don't speed up

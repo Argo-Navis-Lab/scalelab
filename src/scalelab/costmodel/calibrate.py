@@ -15,7 +15,7 @@ from scalelab.core.config import StrictModel
 from scalelab.core.envcapture import EnvInfo
 from scalelab.core.storage import atomic_write_text
 from scalelab.costmodel.ops import Op
-from scalelab.costmodel.roofline import DTYPE, Efficiency, Group, group, time_ops
+from scalelab.costmodel.roofline import Efficiency, Group, group, time_ops
 from scalelab.costmodel.specs import HardwareSpec
 
 GROUPS: tuple[Group, ...] = get_args(Group)
@@ -81,7 +81,7 @@ def fit(samples: Sequence[Sample], hardware: HardwareSpec) -> dict[Group, Effici
     names: list[Group] = [group(op) for op in ops]
     groups: list[Group] = [name for name in GROUPS if name in names]
     which = np.array([groups.index(name) for name in names])
-    compute = np.array([op.flops for op in ops]) / hardware.peak_flops[DTYPE]  # seconds at peak
+    compute = np.array([op.flops / hardware.peak_flops[op.dtype] for op in ops])  # s at peak
     memory = np.array([op.bytes_read + op.bytes_written for op in ops]) / hardware.memory_bw
     measured = np.log([sample.seconds for sample in samples])
 

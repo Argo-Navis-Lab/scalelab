@@ -102,7 +102,7 @@ def measure_forward_backward(
         results = [Measurement(op=op, timing=timed(forward))]
     if inputs:
         out = forward()
-        grad = torch.randn(out.shape, generator=generator, device=device)
+        grad = torch.randn(out.shape, generator=generator, device=device, dtype=out.dtype)
         # retain_graph keeps what the forward saved, so the next call can use it again
         backward = partial(torch.autograd.grad, out, inputs, grad, retain_graph=True)
         results.append(Measurement(op=grad_op(op), timing=timed(backward)))

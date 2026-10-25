@@ -60,3 +60,15 @@ def test_the_gpu_must_be_the_one_named(
 def test_an_unknown_model_is_a_usage_error(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["bench", "--hardware", "cpu", "--models", "ladder_s/m9", "--dry-run"]) == 2
     assert "no model config 'ladder_s/m9'" in capsys.readouterr().err
+
+
+def test_fp16_times_only_the_suites_it_changes(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = ["bench", "--hardware", "t4", "--models", "ladder_s/m1", "--precision", "fp16"]
+    assert main([*argv, "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "precision:     fp16\n" in out
+    assert [line.split(":")[0] for line in out.splitlines()[4:]] == ["gemm", "attention", "decode"]
+    assert main([*argv, "--suites", "copy", "--dry-run"]) == 2
+    assert "--precision fp16 times only gemm attention decode" in capsys.readouterr().err

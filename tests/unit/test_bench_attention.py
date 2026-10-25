@@ -127,3 +127,44 @@ def test_training_is_timed_forward_then_backward_generation_forward_only() -> No
     training, generating = (attention_op(case) for case in cases)
     assert [result.op for result in results] == [training, grad_op(training), generating]
     assert all(len(result.timing.samples) == 3 and result.seconds > 0 for result in results)
+
+
+def test_fp16_attention_moves_half_the_bytes() -> None:
+    case = AttentionCase(batch=2, heads=3, head_dim=4, tokens=5)
+    full, half = attention_op(case), attention_op(case, "fp16")
+    assert half.dtype == "fp16" and half.flops == full.flops
+    assert (2 * half.bytes_read, 2 * half.bytes_written) == (full.bytes_read, full.bytes_written)
+
+
+@pytest.mark.parametrize("name", LADDER)
+def test_fp16_cases_are_the_attention_of_fp16_graphs(name: str) -> None:
+    model = spec(name)
+    for case in attention_cases([model]):
+        workload = WorkloadSpec(
+            phase="train" if case.past == 0 else "decode",
+            batch=case.batch,
+            tokens=case.tokens,
+            past=case.past,
+            precision="fp16",
+        )
+        op = attention_op(case, "fp16")
+        assert op.dtype == sdpa(model, workload).dtype == "fp16"
+        assert cost(op) == cost(sdpa(model, workload))
+
+
+def test_fp16_is_timed_in_float16(monkeypatch: pytest.MonkeyPatch) -> None:
+    dtypes: set[torch.dtype] = set()
+    real = F.scaled_dot_product_attention
+
+    def spy(
+        q: Tensor, k: Tensor, v: Tensor, attn_mask: Tensor | None = None, is_causal: bool = False
+    ) -> Tensor:
+        dtypes.update(t.dtype for t in (q, k, v))
+        return real(q, k, v, attn_mask=attn_mask, is_causal=is_causal)
+
+    monkeypatch.setattr(F, "scaled_dot_product_attention", spy)
+    cases = [AttentionCase(2, 2, 4, tokens=8), AttentionCase(2, 2, 4, tokens=1, past=7)]
+    results = bench_attention(cases, CPU, precision="fp16", warmup=1, repeats=3, min_sample_s=0)
+    training, generating = (attention_op(case, "fp16") for case in cases)
+    assert [result.op for result in results] == [training, grad_op(training), generating]
+    assert dtypes == {torch.float16}

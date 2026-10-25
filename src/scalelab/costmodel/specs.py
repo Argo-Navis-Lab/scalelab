@@ -181,6 +181,6 @@ CPU = HardwareSpec(
     name="cpu",
     memory_bytes=16 * 2**30,
     supports_bf16=False,
-    peak_flops={"fp32": 2e12},
+    peak_flops={"fp32": 2e12, "fp16": 2e12},  # m3s19: fp16 the same stand-in
     memory_bw=100e9,
 )

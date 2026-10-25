@@ -13,8 +13,9 @@ from scalelab.bench.attention import BATCHES, LENGTHS
 from scalelab.bench.timing import MIN_SAMPLE_S, REPEATS, WARMUP, Timing, measure
 from scalelab.core.config import ModelConfig, StrictModel
 from scalelab.costmodel.ops import Op, op_graph
-from scalelab.costmodel.specs import ModelSpec, WorkloadSpec
+from scalelab.costmodel.specs import ModelSpec, Precision, WorkloadSpec
 from scalelab.models.kvcache import KVCache
+from scalelab.models.precision import autocast
 from scalelab.models.transformer import Transformer
 from scalelab.tasks.tokenizer import VOCAB_SIZE
 
@@ -80,15 +81,19 @@ def bench_decode(
     cases: Iterable[DecodeCase],
     device: torch.device,
     *,
+    precision: Precision = "fp32",
     warmup: int = WARMUP,
     repeats: int = REPEATS,
     min_sample_s: float = MIN_SAMPLE_S,
 ) -> list[StepMeasurement]:
-    """Times Transformer.decode recording no graph, as the sampler runs it."""
+    """Times Transformer.decode recording no graph, as the sampler runs it. In fp16 (m3s19)
+    each case is one autocast region, as a generate call will be: the cache is float16, and
+    the weights are cast once, while warming up."""
     generator = torch.Generator(device).manual_seed(0)
     results: list[StepMeasurement] = []
     for case in cases:
-        with torch.no_grad():  # the step is only an argument: freed as soon as it is timed
+        # the step is only an argument: freed as soon as it is timed
+        with torch.no_grad(), autocast(precision, device):
             timing = measure(
                 _decode_step(case, device, generator),
                 device,
@@ -96,7 +101,9 @@ def bench_decode(
                 repeats=repeats,
                 min_sample_s=min_sample_s,
             )
-        workload = WorkloadSpec(phase="decode", batch=case.batch, tokens=1, past=case.past)
+        workload = WorkloadSpec(
+            phase="decode", batch=case.batch, tokens=1, past=case.past, precision=precision
+        )
         spec = ModelSpec.from_config(case.model)
         results.append(
             StepMeasurement(model=case.model.name, spec=spec, workload=workload, timing=timing)

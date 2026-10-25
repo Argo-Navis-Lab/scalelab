@@ -17,9 +17,10 @@ from scalelab.bench.timing import (
     Measurement,
     measure_forward_backward,
 )
-from scalelab.costmodel.ops import VALUE_BYTES, Op
-from scalelab.costmodel.specs import ModelSpec
+from scalelab.costmodel.ops import BYTES, Op
+from scalelab.costmodel.specs import ModelSpec, Precision
 from scalelab.models.kvcache import LayerCache
+from scalelab.models.precision import DTYPES
 
 CONTEXT = 256  # the models' context (ModelConfig's default): the longest sequence, a cache's size
 LENGTHS = (16, 64, 128, CONTEXT)  # tokens a sequence
@@ -58,9 +59,10 @@ def attention_cases(
     return list(cases)
 
 
-def attention_op(case: AttentionCase) -> Op:
+def attention_op(case: AttentionCase, dtype: Precision = "fp32") -> Op:
     """One benchmarked attention as op_graph counts attn.sdpa (layer 0: it is in no model)."""
     batch, heads, head_dim, tokens, past = case
+    size = BYTES[dtype]
     width = heads * head_dim
     queries, keys = batch * tokens, batch * (past + tokens)
     pairs = batch * (tokens * past + tokens * (tokens + 1) // 2)  # none of the masked ones
@@ -69,8 +71,9 @@ def attention_op(case: AttentionCase) -> Op:
         layer=0,
         op_class="attention",
         flops=4 * pairs * width,
-        bytes_read=VALUE_BYTES * (queries + 2 * keys) * width,
-        bytes_written=VALUE_BYTES * queries * width,
+        bytes_read=size * (queries + 2 * keys) * width,
+        bytes_written=size * queries * width,
+        dtype=dtype,
     )
 
 
@@ -86,7 +89,7 @@ def cached(q: Tensor, k: Tensor, v: Tensor, allowed: Tensor) -> Tensor:
 
 
 def _kernel(
-    case: AttentionCase, device: torch.device, generator: torch.Generator
+    case: AttentionCase, device: torch.device, generator: torch.Generator, dtype: torch.dtype
 ) -> tuple[Callable[[], Tensor], list[Tensor]]:
     """The attention on random inputs laid out in memory as the models lay theirs out, and the
     tensors training's backward pass gives gradients to (none while generating)."""
@@ -96,14 +99,16 @@ def _kernel(
         """(batch, heads, length, head_dim) as a view of (batch, length, heads, head_dim), the
         way _split_heads leaves it: a kernel may treat a view's strides differently."""
         shape = (batch, length, heads, head_dim)
-        x = torch.randn(shape, generator=generator, device=device, requires_grad=requires_grad)
+        x = torch.randn(
+            shape, generator=generator, device=device, dtype=dtype, requires_grad=requires_grad
+        )
         return x.transpose(1, 2)
 
     if past == 0:
         q, k, v = (split_heads(tokens, requires_grad=True) for _ in range(3))
         return partial(causal, q, k, v), [q, k, v]
     # The cache is allocated at full length, as new_cache does, and read through a view.
-    cache = LayerCache(batch, heads, CONTEXT, head_dim, torch.float32, device)
+    cache = LayerCache(batch, heads, CONTEXT, head_dim, dtype, device)
     k, v = cache.store(split_heads(past + tokens), split_heads(past + tokens), 0)
     positions = torch.arange(past, past + tokens, device=device)
     allowed = torch.arange(past + tokens, device=device) <= positions[:, None]  # as decode's
@@ -114,19 +119,21 @@ def bench_attention(
     cases: Iterable[AttentionCase],
     device: torch.device,
     *,
+    precision: Precision = "fp32",
     warmup: int = WARMUP,
     repeats: int = REPEATS,
     min_sample_s: float = MIN_SAMPLE_S,
 ) -> list[Measurement]:
-    """Times each attention forward, then training's backward pass alone."""
+    """Times each attention forward, then training's backward pass alone, in float32 or
+    (m3s19) float16."""
     generator = torch.Generator(device).manual_seed(0)
     results: list[Measurement] = []
     for case in cases:
-        forward, inputs = _kernel(case, device, generator)
+        forward, inputs = _kernel(case, device, generator, DTYPES[precision])
         results += measure_forward_backward(
             forward,
             inputs,
-            attention_op(case),
+            attention_op(case, precision),
             device,
             generator,
             warmup=warmup,

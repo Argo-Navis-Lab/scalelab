@@ -21,11 +21,14 @@ from scalelab.analysis.reports import gains
 from scalelab.analysis.stats import Interval
 from scalelab.bench.comms import SIZES, Backend, bench_collectives
 from scalelab.bench.suites import (
+    HALF_SUITES,
+    PRECISIONS,
     SUITES,
     Suite,
     bench_folder,
     load_samples,
     plan_suite,
+    results_file,
     save_results,
 )
 from scalelab.core import hashing
@@ -57,7 +60,7 @@ from scalelab.costmodel.comms import COLLECTIVES, collective_time, fit_link
 from scalelab.costmodel.report import DecisionReport, Measurement, reports_folder
 from scalelab.costmodel.rlstep import StepPrediction
 from scalelab.costmodel.roofline import Efficiency, Group
-from scalelab.costmodel.specs import CPU, HARDWARE, HardwareSpec
+from scalelab.costmodel.specs import CPU, HARDWARE, HardwareSpec, Precision
 from scalelab.costmodel.validate import (
     PARTS,
     TARGET_MAPE,
@@ -555,12 +558,21 @@ def load_model(choice: str) -> ModelConfig:
 
 
 def bench(
-    hardware_name: str, choices: Sequence[str], suites: Sequence[Suite], dry_run: bool
+    hardware_name: str,
+    choices: Sequence[str],
+    suites: Sequence[Suite] | None,
+    precision: Precision,
+    dry_run: bool,
 ) -> int:
     """`scalelab bench`: times the cost model's ops and whole decode steps, shaped as the
     models' own, on this machine's GPU (its CPU for --hardware cpu), and saves each suite's
-    results to <home>/bench/<hardware>/<suite>.parquet. Records nothing in the registry. A dry
-    run only says what it would time."""
+    results to <home>/bench/<hardware>/<suite>.parquet (m3s19: in fp16, <suite>-fp16.parquet,
+    and only the suites fp16 changes). Records nothing in the registry. A dry run only says
+    what it would time."""
+    if suites is None:
+        suites = SUITES if precision == "fp32" else HALF_SUITES
+    if precision != "fp32" and not set(suites) <= set(HALF_SUITES):
+        raise UsageError(f"--precision {precision} times only {' '.join(HALF_SUITES)}")
     hardware = HARDWARE.get(hardware_name)  # None: the CPU, whose memory isn't modelled
     models = [load_model(choice) for choice in choices]
     device = torch.device("cpu" if hardware is None else "cuda")
@@ -573,17 +585,18 @@ def bench(
     folder = bench_folder(scalelab_home(), hardware_name)
     print(f"hardware:      {hardware_name}")
     print(f"models:        {' '.join(choices)}")
+    print(f"precision:     {precision}")
     print(f"results:       {folder}{' (dry run: nothing is timed or saved)' if dry_run else ''}")
     env = capture_env()
     for suite in suites:
-        plan = plan_suite(suite, models, hardware)
+        plan = plan_suite(suite, models, hardware, precision)
         line = f"{suite + ':':<15}{plan.cases} cases"
         if plan.skipped:
             line += f" ({plan.skipped} more too big for {hardware_name})"
         if plan.cases and not dry_run:
             start = time.perf_counter()
             results = plan.run(device)
-            save_results(folder / f"{suite}.parquet", results, env)
+            save_results(folder / results_file(suite, precision), results, env)
             line += f": {len(results)} timings in {duration(time.perf_counter() - start)}"
         print(line, flush=True)
     return 0
@@ -921,7 +934,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="model configs whose shapes are timed (default: ladder_s/m1 to ladder_s/m4)",
     )
     bench_parser.add_argument(
-        "--suites", nargs="+", choices=SUITES, default=list(SUITES), help="default: all five"
+        "--suites",
+        nargs="+",
+        choices=SUITES,
+        help="default: all five (fp16: gemm attention decode)",
+    )
+    bench_parser.add_argument(
+        "--precision",
+        choices=PRECISIONS,
+        default="fp32",
+        help="fp16: float16 kernels as autocast runs them, saved as <suite>-fp16.parquet",
     )
     bench_parser.add_argument(
         "--dry-run", action="store_true", help="say what would be timed, and time nothing"
@@ -1021,7 +1043,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "report":
             return report_gains()
         if args.command == "bench":
-            return bench(args.hardware, args.models, args.suites, args.dry_run)
+            return bench(args.hardware, args.models, args.suites, args.precision, args.dry_run)
         if args.command == "cost" and args.cost_command == "calibrate":
             return cost_calibrate(args.hardware)
         if args.command == "cost" and args.cost_command == "validate":

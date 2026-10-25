@@ -21,7 +21,7 @@ from scalelab.costmodel.calibrate import (
     save_calibration,
 )
 from scalelab.costmodel.ops import Op, grad_op, matmul_op, op_graph
-from scalelab.costmodel.roofline import HALF, Efficiency, Group, group, time_ops
+from scalelab.costmodel.roofline import Efficiency, Group, group, time_ops
 from scalelab.costmodel.specs import HARDWARE, ModelSpec, WorkloadSpec
 
 HELLO = Path(__file__).resolve().parents[2] / "configs" / "experiments" / "hello.yaml"
@@ -40,6 +40,10 @@ def spec(*overrides: str) -> ModelSpec:
 
 def decode(batch: int, past: int) -> WorkloadSpec:
     return WorkloadSpec(phase="decode", batch=batch, tokens=1, past=past)
+
+
+def half(workload: WorkloadSpec) -> WorkloadSpec:
+    return workload.model_copy(update={"precision": "fp16"})
 
 
 def single_ops() -> list[Op]:
@@ -71,8 +75,14 @@ def test_every_op_has_a_group_the_benchmarks_fit(overrides: list[str]) -> None:
         )
     benched += [attention_op(case) for case in attention_cases([model])]
     benched += op_graph(model, decode(1, 15))  # a whole decode step
+    # m3s19: fp16's benchmarks, and the fp16 steps that need them
+    benched += [gemm_op(shape, "fp16") for shape in gemm_shapes([model])]
+    benched += [attention_op(case, "fp16") for case in attention_cases([model])]
+    benched += op_graph(model, half(decode(1, 15)))
+    for workload in (TRAIN, decode(64, 100)):
+        needed |= {group(op) for op in op_graph(model, half(workload))}
     fitted = {group(op) for op in benched}
-    assert fitted == set(GROUPS) - set(HALF.values())  # fp16's benchmarks: m3s19
+    assert fitted == set(GROUPS)
     assert needed <= fitted
 
 

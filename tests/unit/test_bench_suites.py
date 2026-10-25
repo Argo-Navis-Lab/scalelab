@@ -9,6 +9,7 @@ from scalelab.bench.decode import StepMeasurement, decode_cases
 from scalelab.bench.elementwise import COPY_SIZES, copy_op, elementwise_cases
 from scalelab.bench.gemm import gemm_op, gemm_shapes
 from scalelab.bench.suites import (
+    HALF_SUITES,
     SUITES,
     bench_folder,
     decode_fits,
@@ -16,6 +17,7 @@ from scalelab.bench.suites import (
     load_results,
     load_samples,
     plan_suite,
+    results_file,
     save_results,
 )
 from scalelab.bench.timing import Measurement, Timing
@@ -98,3 +100,24 @@ def test_samples_come_from_every_suite_saved(tmp_path: Path) -> None:
     save_results(tmp_path / "copy.parquet", copies, env.model_copy(update={"software": newer}))
     with pytest.raises(ValueError, match="different versions"):
         load_samples(tmp_path)
+
+
+def test_fp16_plans_only_the_suites_it_changes() -> None:
+    m1 = LADDER[0]
+    for suite in HALF_SUITES:
+        assert plan_suite(suite, [m1], None, "fp16").cases == plan_suite(suite, [m1], None).cases
+    for suite in sorted(set(SUITES) - set(HALF_SUITES)):
+        with pytest.raises(ValueError, match="fp32 only"):
+            plan_suite(suite, [m1], None, "fp16")
+    assert results_file("gemm") == "gemm.parquet"
+    assert results_file("decode", "fp16") == "decode-fp16.parquet"
+
+
+def test_fp16_samples_are_labelled_apart(tmp_path: Path) -> None:
+    fp32 = Measurement(op=gemm_op((8, 16, 4)), timing=Timing(number=1, samples=(5e-5,)))
+    fp16 = Measurement(op=gemm_op((8, 16, 4), "fp16"), timing=Timing(number=1, samples=(3e-5,)))
+    env = capture_env()
+    save_results(tmp_path / results_file("gemm", "fp16"), [fp16], env)
+    save_results(tmp_path / results_file("gemm"), [fp32], env)
+    samples, _ = load_samples(tmp_path)  # fp32's first, whichever was saved first
+    assert samples == [Sample("gemm", [fp32.op], 5e-5), Sample("gemm-fp16", [fp16.op], 3e-5)]

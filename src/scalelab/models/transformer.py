@@ -80,11 +80,14 @@ class Transformer(nn.Module):
         return self.head(self.norm(x))
 
     def new_cache(self, batch: int) -> KVCache:
-        """An empty KV cache for `batch` sequences of up to `context` tokens, in the model's
-        own dtype and on its device."""
+        """An empty KV cache for `batch` sequences of up to `context` tokens, on the model's
+        device, in the dtype attention computes in: autocast's inside an autocast region (m3s19:
+        else every step would cast the whole cache), else the model's own."""
         weight = self.embed.weight
+        autocasting = torch.is_autocast_enabled(weight.device.type)
+        dtype = torch.get_autocast_dtype(weight.device.type) if autocasting else weight.dtype
         layers = [
-            block.attn.new_cache(batch, self.config.context, weight.dtype, weight.device)
+            block.attn.new_cache(batch, self.config.context, dtype, weight.device)
             for block in self._typed_blocks()
         ]
         return KVCache(layers, self.config.context)

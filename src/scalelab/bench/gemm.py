@@ -8,7 +8,8 @@ import torch.nn.functional as F
 
 from scalelab.bench.timing import MIN_SAMPLE_S, REPEATS, WARMUP, Measurement, measure
 from scalelab.costmodel.ops import Op, matmul_op
-from scalelab.costmodel.specs import ModelSpec
+from scalelab.costmodel.specs import ModelSpec, Precision
+from scalelab.models.precision import DTYPES
 
 # Tokens in a matmul's activations: prefill, log-prob and training passes, from a batch of
 # prompts up to a micro-batch of whole sequences (64 × 256). Decoding's matmuls, one token a
@@ -34,28 +35,31 @@ def gemm_shapes(models: Iterable[ModelSpec], rows: Sequence[int] = ROWS) -> list
     return list(shapes)
 
 
-def gemm_op(shape: Shape) -> Op:
+def gemm_op(shape: Shape, dtype: Precision = "fp32") -> Op:
     """One benchmarked matmul as the cost model counts it (layer 0: it is in no model)."""
     rows, inner, cols = shape
-    return matmul_op(f"gemm {rows}x{inner}x{cols}", 0, rows, inner, cols, "gemm")
+    return matmul_op(f"gemm {rows}x{inner}x{cols}", 0, rows, inner, cols, "gemm", dtype)
 
 
 def bench_gemm(
     shapes: Iterable[Shape],
     device: torch.device,
     *,
+    precision: Precision = "fp32",
     warmup: int = WARMUP,
     repeats: int = REPEATS,
     min_sample_s: float = MIN_SAMPLE_S,
 ) -> list[Measurement]:
     """Times each matmul the way the models' linear layers run it: float32 activations
-    (rows × inner) times a weight stored as (cols × inner)."""
+    (rows × inner) times a weight stored as (cols × inner). In fp16 (m3s19) both are float16,
+    as autocast casts them."""
+    dtype = DTYPES[precision]
     generator = torch.Generator(device).manual_seed(0)
     results: list[Measurement] = []
     for shape in shapes:
         rows, inner, cols = shape
-        x = torch.randn(rows, inner, generator=generator, device=device)
-        weight = torch.randn(cols, inner, generator=generator, device=device)
+        x = torch.randn(rows, inner, generator=generator, device=device, dtype=dtype)
+        weight = torch.randn(cols, inner, generator=generator, device=device, dtype=dtype)
         timing = measure(
             partial(F.linear, x, weight),
             device,
@@ -63,5 +67,5 @@ def bench_gemm(
             repeats=repeats,
             min_sample_s=min_sample_s,
         )
-        results.append(Measurement(op=gemm_op(shape), timing=timing))
+        results.append(Measurement(op=gemm_op(shape, precision), timing=timing))
     return results

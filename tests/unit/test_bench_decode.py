@@ -61,3 +61,19 @@ def test_every_call_decodes_the_same_position(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(Transformer, "decode", spy)
     bench_decode([DecodeCase(TINY, 2, 5)], CPU, warmup=2, repeats=3, min_sample_s=1e-3)
     assert len(positions) >= 5 and set(positions) == {5}
+
+
+def test_fp16_decodes_under_autocast_from_a_float16_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: set[tuple[bool, torch.dtype]] = set()  # autocast on?, the cache's dtype
+    real = Transformer.decode
+
+    def spy(self: Transformer, tokens: Tensor, cache: KVCache) -> Tensor:
+        seen.add((torch.is_autocast_enabled("cpu"), cache.layers[0].k.dtype))
+        return real(self, tokens, cache)
+
+    monkeypatch.setattr(Transformer, "decode", spy)
+    cases = [DecodeCase(TINY, 2, 5)]
+    results = bench_decode(cases, CPU, precision="fp16", warmup=2, repeats=3, min_sample_s=1e-3)
+    assert seen == {(True, torch.float16)}
+    assert results[0].workload.precision == "fp16"
+    assert any(op.name.startswith("cast ") for op in results[0].ops)  # an fp16 graph

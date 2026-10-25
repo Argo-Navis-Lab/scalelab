@@ -422,7 +422,7 @@ def test_cost_measure_predicts_the_cut_then_times_it_and_records_no_run(
     (prediction,) = (home / "reports").glob("padding-cut-*-cpu.json")
     stem = prediction.with_suffix("")
     assert re.search(rf"predicted: +step [\d.]+ -> [\d.]+ s \([-+][\d.]+%\), {stem}\.md", output)
-    assert "steps:         1 to warm up, then 2 timed; without, then with the cut" in output
+    assert "steps:         1 to warm up, then 2 timed; without, then with padding-cut" in output
     assert "# Measured: padding-cut, rl on cpu\n" in output
     seconds = r"(\d+\.\d{4} \| ){2}"
     assert re.search(rf"\| step \| {seconds}[-+]\d+\.\d% \| {seconds}[-+]\d+\.\d% \|", output)
@@ -521,3 +521,16 @@ def test_cost_validate_predicts_each_run_as_it_ran(home: Path, capsys: pytest.Ca
     assert main(["cost", "validate", "--hardware", "cpu"]) == 0
     expected = "runs:          1 runs timed their steps (left out 1 in fp16, with no fp16 fit)\n"
     assert expected in capsys.readouterr().out
+
+
+# --- added in m3s24: fp16, measured --------------------------------------------------------------
+
+
+def test_cost_measure_times_fp16_beside_fp32(home: Path, capsys: pytest.CaptureFixture[str]):
+    timed = ["--hardware", "cpu", "--change", "fp16", "--steps", "2", "--warmup", "1"]
+    assert main(["cost", "measure", str(HELLO), *SMALL, *timed]) == 0
+    output = capsys.readouterr().out
+    assert "steps:         1 to warm up, then 2 timed; without, then with fp16" in output
+    assert "# Measured: fp16, hello on cpu\n" in output
+    (prediction,) = (home / "reports").glob("fp16-*-cpu.json")
+    assert prediction.with_name(f"{prediction.stem}-measured.json").is_file()

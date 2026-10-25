@@ -5,13 +5,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from scalelab.core.config import ExperimentConfig, load_config
+from scalelab.core.config import ExperimentConfig, RuntimeConfig, load_config
 from scalelab.costmodel.rlstep import predict_warm_start_step
 from scalelab.costmodel.specs import CPU, HARDWARE, ModelSpec
 from scalelab.rl.costing import (
     ANSWER_SAMPLES,
     padding_cut,
     predict_rl_run,
+    predict_run_step,
     predict_step,
     rl_step_spec,
     warm_start_step_spec,
@@ -116,3 +117,20 @@ def test_specs_take_a_precision() -> None:
         fp32, fp16 = predict_step(config, t4), predict_step(config, t4, precision="fp16")
         assert fp16.flops == fp32.flops  # the same matmuls: budgets buy the same steps
         assert fp16.seconds < fp32.seconds
+
+
+# --- added in m3s23: a run's step, as its runtime ran it -----------------------------------------
+
+
+def test_a_run_is_predicted_in_its_precision_and_with_its_cut() -> None:
+    t4 = HARDWARE["t4"]
+    for config in (rl_config(), load_config(EXPERIMENTS / "warmstart.yaml")):
+        assert predict_run_step(config, RuntimeConfig(), t4) == predict_step(config, t4)
+        fp16 = predict_run_step(config, RuntimeConfig(precision="fp16"), t4)
+        assert fp16 == predict_step(config, t4, precision="fp16")
+        cut = predict_run_step(config, RuntimeConfig(padding_cut=True), t4)
+        assert cut == padding_cut(config, t4)
+        both = predict_run_step(config, RuntimeConfig(precision="fp16", padding_cut=True), t4)
+        assert both == padding_cut(config, t4, precision="fp16")
+        assert both.seconds < cut.seconds  # the cut in fp16 is still fp16...
+        assert both.seconds < fp16.seconds  # ...and still cut

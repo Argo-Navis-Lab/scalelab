@@ -90,7 +90,7 @@ from scalelab.rl.experiment import (
 from scalelab.rl.finished import load_finished_run
 from scalelab.rl.gradings import Grading, gradings_folder, load_gradings, save_grading
 from scalelab.rl.loop import SNAPSHOTS, RLStepMetrics
-from scalelab.rl.measure import measure_padding_cut
+from scalelab.rl.measure import measure_change
 from scalelab.rl.overhead import OVERHEAD_BUDGET, measure_overhead
 from scalelab.rl.warmstart_loop import StepMetrics
 from scalelab.telemetry.anomalies import AnomalyEvent, RunHalted
@@ -883,12 +883,18 @@ def cost_compare(
 
 
 def cost_measure(
-    experiment: Path, overrides: Sequence[str], hardware_name: str, steps: int, warmup: int
+    experiment: Path,
+    overrides: Sequence[str],
+    hardware_name: str,
+    change: Change,
+    steps: int,
+    warmup: int,
 ) -> int:
-    """`scalelab cost measure` (m3s17): the padding cut, measured. Predicts it as cost compare
-    does and saves that report first; then runs the experiment's first steps twice on this
-    machine, without the cut and with it (RL from its warm start), and saves each part's measured
-    seconds beside the prediction under <home>/reports/. Records nothing in the registry."""
+    """`scalelab cost measure` (m3s17): a change (the padding cut, or fp16: m3s24), measured.
+    Predicts it as cost compare does and saves that report first; then runs the experiment's
+    first steps twice on this machine, in fp32 without the cut and then with the change (RL from
+    its warm start), and saves each part's measured seconds beside the prediction under
+    <home>/reports/. Records nothing in the registry."""
     if steps < 1 or warmup < 1:
         raise UsageError(f"--steps and --warmup must be at least 1, got {steps} and {warmup}")
     config, seed, runtime = resolve(experiment, overrides)
@@ -902,17 +908,17 @@ def cost_measure(
             start = load_warm_start(config.rl.from_run, config.model, registry, home)
     print(f"experiment:    {config.name} (config {hashing.config_hash(config)}), seed {seed}")
     print(f"device:        {device}")
-    report = decision_report(config, hardware_name)
+    report = decision_report(config, hardware_name, change)
     stem = reports_folder(home) / f"{report.change}-{report.config_hash}-{hardware_name}"
     save_report(stem, report)  # the prediction, saved before anything runs
     before, after = report.baseline.seconds, report.candidate.seconds
     print(f"predicted:     step {before:.4f} -> {after:.4f} s ({-report.saving:+.1%}), {stem}.md")
-    print(f"steps:         {warmup} to warm up, then {steps} timed; without, then with the cut")
+    print(f"steps:         {warmup} to warm up, then {steps} timed; without, then with {change}")
     deterministic = runtime.deterministic
     if deterministic is None:
         deterministic = default_deterministic()
     try:
-        timed = measure_padding_cut(config, seed, start, deterministic, steps, warmup)
+        timed = measure_change(config, seed, change, start, deterministic, steps, warmup)
     except ValueError as err:  # a warm start whose budget ends sooner
         raise UsageError(str(err)) from None
     measurement = Measurement(report=report, steps=steps, baseline=timed.off, candidate=timed.on)
@@ -1090,10 +1096,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         "start's batch)",
     )
     measure_parser = cost_commands.add_parser(
-        "measure", help="the padding cut, measured: the same steps without it, then with it"
+        "measure", help="a change, measured: the same steps without it, then with it"
     )
     measure_parser.add_argument("experiment", type=Path, help="e.g. configs/experiments/rl.yaml")
     measure_parser.add_argument("overrides", nargs="*", help="key=value changes, as for run")
+    measure_parser.add_argument(
+        "--change",
+        choices=list(CHANGES),
+        default="padding-cut",
+        help="the padding cut (the default) or fp16 autocast (m3s24)",
+    )
     measure_parser.add_argument(
         "--hardware",
         required=True,
@@ -1140,7 +1152,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.command == "cost" and args.cost_command == "measure":
             return cost_measure(
-                args.experiment, args.overrides, args.hardware, args.steps, args.warmup
+                args.experiment,
+                args.overrides,
+                args.hardware,
+                args.change,
+                args.steps,
+                args.warmup,
             )
         if args.command == "cost" and args.cost_command == "comms":
             return cost_comms(args.world, args.backend)

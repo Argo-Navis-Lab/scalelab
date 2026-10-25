@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from scalelab.core.checkpoint import CheckpointPolicy
-from scalelab.core.config import ExperimentConfig
+from scalelab.core.config import ExperimentConfig, Precision
+from scalelab.costmodel.report import Change
 from scalelab.models.transformer import Transformer
 from scalelab.rl.costing import measured_step
 from scalelab.rl.experiment import run_experiment, run_rl_experiment
@@ -18,28 +19,31 @@ RUN_ID = "measure"  # the metrics' folder inside each run's temporary home
 
 @dataclass(frozen=True)
 class Timed:
-    """The same steps without the padding cut (off) and with it (on): each part's mean seconds
-    a step (generate, logprobs, train, step; a warm start: train, step), as cost validate reads
-    them from real runs."""
+    """The same steps without the change (off: fp32, uncut) and with it (on): each part's mean
+    seconds a step (generate, logprobs, train, step; a warm start: train, step), as cost
+    validate reads them from real runs."""
 
     off: dict[str, float]
     on: dict[str, float]
 
 
-def measure_padding_cut(
+def measure_change(
     config: ExperimentConfig,
     seed: int,
+    change: Change,
     start: Transformer | None = None,
     deterministic: bool | None = None,
     steps: int = 20,
     warmup: int = 3,
 ) -> Timed:
-    """Run the first `warmup + steps` steps of `config` twice, without runtime.padding_cut and
-    then with it, and average each part's laps over the last `steps` of each. An RL experiment
-    trains its own copy of `start` (its warm start) each time; a warm start begins from its
-    seed (`start` None). Both runs draw the same data and do the same math, to rounding (m3s16),
-    with telemetry on, as real runs have it. Nothing is graded and everything is written to a
-    temporary folder, so nothing is recorded.
+    """Run the first `warmup + steps` steps of `config` twice, in fp32 without the padding cut
+    and then with `change` (runtime.padding_cut, m3s17; runtime.precision fp16, m3s24), and
+    average each part's laps over the last `steps` of each. An RL experiment trains its own copy
+    of `start` (its warm start) each time; a warm start begins from its seed (`start` None).
+    Both runs draw the same data; the cut does the same math, to rounding (m3s16), while fp16
+    rounds more, so its answers (and their lengths) can drift from fp32's. Telemetry is on, as
+    real runs have it. Nothing is graded and everything is written to a temporary folder, so
+    nothing is recorded.
     """
     if (start is None) != (config.rl is None):
         raise ValueError("an RL experiment starts from its warm start, and a warm start from none")
@@ -50,10 +54,12 @@ def measure_padding_cut(
         rl = config.rl.model_copy(update={"max_steps": last, "flops": math.inf})
         config = config.model_copy(update={"rl": rl})
 
-    def timed(home: Path, padding_cut: bool) -> dict[str, float]:
+    def timed(home: Path, applied: Change | None) -> dict[str, float]:
         sink = MetricsSink(home, RUN_ID)
         policy = CheckpointPolicy(every_seconds=None)  # saved once, after the last step
         checkpoints = home / "checkpoints"
+        padding_cut = applied == "padding-cut"
+        precision: Precision = "fp16" if applied == "fp16" else "fp32"
         if start is None:
             run_experiment(
                 config,
@@ -65,6 +71,7 @@ def measure_padding_cut(
                 sink=sink,
                 padding_cut=padding_cut,
                 stop_after=last,
+                precision=precision,
             )
         else:
             run_rl_experiment(
@@ -77,6 +84,7 @@ def measure_padding_cut(
                 deterministic,
                 sink=sink,
                 padding_cut=padding_cut,
+                precision=precision,
             )
         count, seconds = measured_step(read_metrics(home, RUN_ID), skip=warmup)
         if count < steps:  # the sink's rows reach disk with the save after the last step
@@ -87,6 +95,6 @@ def measure_padding_cut(
         return seconds
 
     with tempfile.TemporaryDirectory() as folder:
-        off = timed(Path(folder) / "off", padding_cut=False)
-        on = timed(Path(folder) / "on", padding_cut=True)
+        off = timed(Path(folder) / "off", None)
+        on = timed(Path(folder) / "on", change)
     return Timed(off, on)

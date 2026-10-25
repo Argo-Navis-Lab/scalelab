@@ -17,6 +17,7 @@ class Validation(StrictModel):
 
     hardware: str
     errors: dict[str, Errors]  # each part's, over the runs that timed it
+    # m3s23: with runs of several runtimes, also each one's step, as "step, fp16 cut"
 
 
 class StepCheck(StrictModel):

@@ -9,7 +9,7 @@ from collections.abc import Iterable, Mapping
 
 import numpy as np
 
-from scalelab.core.config import ExperimentConfig, StrictModel
+from scalelab.core.config import ExperimentConfig, RuntimeConfig, StrictModel
 from scalelab.costmodel.rlstep import (
     RLStepSpec,
     StepPrediction,
@@ -144,17 +144,31 @@ def padding_cut(
     hardware: HardwareSpec,
     efficiencies: Mapping[Group, Efficiency] | None = None,
     micro_batch: int | None = None,
+    precision: Precision = "fp32",
 ) -> StepPrediction:
     """An experiment's step under the padding cut (m3s15): its rows sorted by length, then run
     micro_batch at a time (default: RL's rl.micro_batch, a WARM_START_PIECES-th of a warm
     start's batch), each piece padded only to its own longest row. The same rows and the same
-    update: only padding goes."""
+    update: only padding goes. In `precision` (m3s23: fp16 runs can take the cut too)."""
     model = ModelSpec.from_config(config.model)
     if config.rl is not None:
-        rl = rl_step_spec(config)
+        rl = rl_step_spec(config, precision)
         update = {"sort_rows": True, "micro_batch": micro_batch or rl.micro_batch}
         return predict_rl_step(model, rl.model_copy(update=update), hardware, efficiencies)
-    warm = warm_start_step_spec(config)
+    warm = warm_start_step_spec(config, precision)
     rows = micro_batch or math.ceil(warm.batch_size / WARM_START_PIECES)
-    cut = WarmStartStepSpec(lengths=warm.lengths, batch_size=warm.batch_size, micro_batch=rows)
+    cut = warm.model_copy(update={"micro_batch": rows})
     return predict_warm_start_step(model, cut, hardware, efficiencies)
+
+
+def predict_run_step(
+    config: ExperimentConfig,
+    runtime: RuntimeConfig,
+    hardware: HardwareSpec,
+    efficiencies: Mapping[Group, Efficiency] | None = None,
+) -> StepPrediction:
+    """The step a run of `config` took with these runtime settings (m3s23): in its precision,
+    and under the padding cut if it was on."""
+    if runtime.padding_cut:
+        return padding_cut(config, hardware, efficiencies, precision=runtime.precision)
+    return predict_step(config, hardware, efficiencies, runtime.precision)

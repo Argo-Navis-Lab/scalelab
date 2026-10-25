@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import func, insert, inspect, select
 from sqlalchemy.exc import IntegrityError
 
-from scalelab.core.config import ExperimentConfig
+from scalelab.core.config import ExperimentConfig, RuntimeConfig
 from scalelab.core.envcapture import (
     EnvInfo,
     GitInfo,
@@ -57,7 +57,7 @@ def test_creates_file_and_tables(tmp_path):
     path = tmp_path / "sub" / "registry.db"  # the folder doesn't exist yet either
     registry = Registry.sqlite(path)
     assert path.is_file()
-    tables = ["anomalies", "evals", "experiments", "runs"]
+    tables = ["anomalies", "evals", "experiments", "runs", "runtimes"]
     assert sorted(inspect(registry.engine).get_table_names()) == tables
 
 
@@ -334,3 +334,27 @@ def test_a_registry_from_before_anomalies_gains_the_table(
     reopened = Registry.sqlite(path)
     assert reopened.get_run(run_id) is not None
     assert reopened.list_anomalies(run_id) == []
+
+
+# --- added in m3s23: a run's runtime settings ----------------------------------------------------
+
+
+def test_a_run_keeps_the_runtime_it_started_with(
+    registry: Registry, config: ExperimentConfig, env: EnvInfo
+):
+    runtime = RuntimeConfig(precision="fp16", padding_cut=True)
+    run_id = registry.add_run(config, seed=0, env=env, runtime=runtime)
+    assert registry.get_runtime(run_id) == runtime
+    assert registry.get_runtime(registry.add_run(config, seed=1, env=env)) is None  # none given
+
+
+def test_a_registry_from_before_runtimes_gains_the_table(
+    tmp_path: Path, config: ExperimentConfig, env: EnvInfo
+):
+    path = tmp_path / "registry.db"
+    run_id = Registry.sqlite(path).add_run(config, seed=0, env=env)
+    with Registry.sqlite(path).engine.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE runtimes")  # now it looks like an m3s22 registry
+    reopened = Registry.sqlite(path)
+    assert reopened.get_run(run_id) is not None
+    assert reopened.get_runtime(run_id) is None  # it ran before runtimes were recorded

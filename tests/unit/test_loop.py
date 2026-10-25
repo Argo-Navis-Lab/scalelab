@@ -3,6 +3,7 @@ few steps, the FLOP budget, steps with nothing to learn, and the KL's reference.
 
 import copy
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ from scalelab.core.config import AlgoConfig, ModelConfig, RLConfig
 from scalelab.core.determinism import seed_everything
 from scalelab.models.transformer import Transformer
 from scalelab.rl.loop import SNAPSHOTS, RLStepMetrics, rl_train, sample_problems
+from scalelab.rl.trainer import UpdateMetrics, rl_update
 from scalelab.rl.warmstart import eval_prompts, sample_examples
 from scalelab.tasks.arithmetic import ArithmeticProblem, ArithmeticTask
 from scalelab.tasks.rewards import Reward
@@ -55,6 +57,7 @@ def train(
     flops: float,
     task: ArithmeticTask | None = None,
     reference: bool = True,
+    padding_cut: bool = False,
 ) -> tuple[Transformer, Transformer, list[RLStepMetrics]]:
     """RL from an untrained tiny model, seed 0. Returns the model before, after, and each
     step's metrics."""
@@ -72,6 +75,7 @@ def train(
         home / "ckpt",
         home,
         reference=start if reference else None,
+        padding_cut=padding_cut,
     )
     return start, model, metrics
 
@@ -258,3 +262,19 @@ def test_a_resumed_run_carries_on_with_the_monitors_state(tmp_path: Path):
     second = AnomalyMonitor(MetricsSink(tmp_path, "run"), Cadence())
     assert len(watched(tmp_path, second, steps=3)) == 1  # resumed after step 2
     assert second.cadence.until == 99
+
+
+# --- added in m3s23: the cut reaches the updates -------------------------------------------------
+
+
+def test_the_padding_cut_reaches_every_update(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cuts: list[bool] = []
+
+    def recording(*args: Any, padding_cut: bool = False, **kwargs: Any) -> list[UpdateMetrics]:
+        cuts.append(padding_cut)
+        return rl_update(*args, padding_cut=padding_cut, **kwargs)
+
+    monkeypatch.setattr("scalelab.rl.loop.rl_update", recording)
+    _, _, metrics = train(tmp_path, preset("grpo"), flops=1e10, padding_cut=True)
+    assert len(cuts) == len(metrics) > 1  # one update a step, every one cut
+    assert all(cuts)

@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from typing import get_args
 
 import pytest
 import torch
@@ -14,12 +15,14 @@ import torch
 from scalelab.analysis.reports import gains
 from scalelab.cli import main
 from scalelab.core.checkpoint import latest_checkpoint, load_checkpoint
-from scalelab.core.config import load_config
+from scalelab.core.config import RuntimeConfig, load_config
 from scalelab.core.envcapture import EnvInfo
 from scalelab.core.registry import Registry
+from scalelab.costmodel.calibrate import Calibration, save_calibration
+from scalelab.costmodel.roofline import Efficiency, Group
 from scalelab.costmodel.specs import CPU
 from scalelab.costmodel.validate import PARTS, Validation, check_step
-from scalelab.rl.costing import measured_step, predict_rl_run, predict_step
+from scalelab.rl.costing import measured_step, predict_rl_run, predict_run_step, predict_step
 from scalelab.rl.gradings import load_gradings
 from scalelab.telemetry.sink import metrics_folder, read_metrics
 
@@ -384,14 +387,16 @@ def test_cost_validate_checks_each_run_that_timed_its_steps(
     assert steps >= 1
     check = check_step(timed, predict_rl_run(load_config(RL, rl), CPU).step, steps, measured)
     assert "calibration:   none, so the datasheet's peaks" in out
-    assert "runs:          2 runs timed their steps (left out 1: no timed steps" in out
+    assert "runs:          2 runs timed their steps (left out 1 with no timed steps)\n" in out
     errors = "".join(f"{check.errors[part]:>+10.1%}" for part in PARTS)
-    assert f"{timed:<30}{steps:6d}{errors}  {check.predicted['step']:.3f} s vs " in out
+    assert f"{timed:<30}{'fp32':<10}{steps:6d}{errors}  {check.predicted['step']:.3f} s vs " in out
     # m3s11: the warm start timed its steps too, and is checked on train and step alone
     steps, measured = measured_step(read_metrics(home, warm_start))
     warm = check_step(warm_start, predict_step(load_config(HELLO, SMALL), CPU), steps, measured)
     errors = " " * 20 + "".join(f"{warm.errors[part]:>+10.1%}" for part in ("train", "step"))
-    assert f"{warm_start:<30}{steps:6d}{errors}  {warm.predicted['step']:.3f} s vs " in out
+    assert (
+        f"{warm_start:<30}{'fp32':<10}{steps:6d}{errors}  {warm.predicted['step']:.3f} s vs " in out
+    )
     mape = f"{(abs(check.errors['step']) + abs(warm.errors['step'])) / 2:.1%}"
     assert f"verdict:       step MAPE {mape}, " in out
     validation = Validation.model_validate_json(
@@ -465,3 +470,54 @@ def test_fp16_reaches_warm_starts_and_rl(home: Path, capsys: pytest.CaptureFixtu
     assert sorted(set(scaler)) == [("optim/loss_scale", 2.0**16), ("optim/skipped", 0.0)]
     assert len(scaler) == 2 * steps  # both, at every step
     assert all(row.value == 0 for row in rows if row.metric.startswith("numerics/"))
+
+
+# --- added in m3s23: a run's runtime -------------------------------------------------------------
+
+
+def test_a_run_records_its_runtime_and_resumes_only_with_it(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    assert main(["run", str(HELLO), *SMALL, "runtime.padding_cut=true"]) == 0
+    registry = Registry.sqlite(home / "registry.db")
+    (run,) = registry.list_runs()
+    assert registry.get_runtime(run.run_id) == RuntimeConfig(padding_cut=True)
+    with registry.engine.begin() as conn:
+        conn.exec_driver_sql("UPDATE runs SET status = 'failed'")  # as if it had crashed
+    capsys.readouterr()
+    assert main(["run", str(HELLO), *SMALL, "runtime.precision=fp16"]) == 2
+    expected = (
+        "started with runtime.precision=fp32 runtime.padding_cut=True: resume it the same way"
+    )
+    assert f"run {run.run_id} {expected}" in capsys.readouterr().err
+
+
+def test_cost_validate_predicts_each_run_as_it_ran(home: Path, capsys: pytest.CaptureFixture[str]):
+    fp16 = ["seed=1", "runtime.precision=fp16", "runtime.padding_cut=true"]
+    assert main(["run", str(HELLO), *SMALL]) == 0
+    assert main(["run", str(HELLO), *SMALL, *fp16]) == 0
+    capsys.readouterr()
+    assert main(["cost", "validate", "--hardware", "cpu"]) == 0
+    out = capsys.readouterr().out
+    config = load_config(HELLO, SMALL)
+    registry = Registry.sqlite(home / "registry.db")
+    for run in registry.list_runs():
+        runtime = registry.get_runtime(run.run_id)
+        assert runtime is not None
+        label = "fp16 cut" if run.seed == 1 else "fp32"
+        steps, measured = measured_step(read_metrics(home, run.run_id))
+        check = check_step(run.run_id, predict_run_step(config, runtime, CPU), steps, measured)
+        errors = " " * 20 + "".join(f"{check.errors[part]:>+10.1%}" for part in ("train", "step"))
+        assert f"{run.run_id:<30}{label:<10}{steps:6d}{errors}  " in out
+    validation = Validation.model_validate_json(
+        (home / "bench" / "cpu" / "validation.json").read_text()
+    )
+    assert validation.errors["step, fp16 cut"].samples == 1  # each runtime on its own too
+    assert validation.errors["step, fp32"].samples == 1
+    fitted = Efficiency(compute=0.5, memory=0.5, launch_s=1e-5)
+    fp32 = {name: fitted for name in get_args(Group) if not name.endswith(".fp16")}
+    path = home / "bench" / "cpu" / "calibration.json"  # fitted before any fp16 bench
+    save_calibration(path, Calibration(hardware="cpu", versions={}, efficiencies=fp32, errors={}))
+    assert main(["cost", "validate", "--hardware", "cpu"]) == 0
+    expected = "runs:          1 runs timed their steps (left out 1 in fp16, with no fp16 fit)\n"
+    assert expected in capsys.readouterr().out

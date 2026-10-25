@@ -203,6 +203,7 @@ def rl_train[P](
                 reference=reference,
                 hooks=hooks,
                 timer=timer,
+                padding_cut=padding_cut,
                 precision=precision,  # m3s22
                 scaler=scaler,
                 step=step,

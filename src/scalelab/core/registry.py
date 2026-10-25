@@ -30,7 +30,7 @@ from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.pool import ConnectionPoolEntry
 
 from scalelab.core import hashing
-from scalelab.core.config import ExperimentConfig, StrictModel
+from scalelab.core.config import ExperimentConfig, RuntimeConfig, StrictModel
 from scalelab.core.envcapture import EnvInfo
 
 RunStatus = Literal["running", "done", "failed"]
@@ -93,6 +93,13 @@ anomalies = Table(  # m2s35
     Column("severity", String, nullable=False),  # "WARN", "SNAPSHOT" or "HALT"
     Column("signature_json", Text, nullable=False),  # the numbers it judged by, as JSON
     Column("label", String),  # what really happened, once known (M5's fault library)
+)
+
+runtimes = Table(  # m3s23
+    "runtimes",
+    metadata,
+    Column("run_id", String, ForeignKey("runs.run_id"), primary_key=True),
+    Column("runtime_json", Text, nullable=False),  # its RuntimeConfig, as it started
 )
 
 
@@ -223,8 +230,10 @@ class Registry:
         env: EnvInfo,
         executor: str = "local",
         deterministic: bool = False,
+        runtime: RuntimeConfig | None = None,
     ) -> str:
-        """Record a new run as 'running' (and its experiment, if new). Returns the run_id."""
+        """Record a new run as 'running' (and its experiment, if new), with the runtime settings
+        it starts with, if given (m3s23). Returns the run_id."""
         run_id = hashing.run_id(config, seed, env.git.sha)
         config_hash = hashing.config_hash(config)
         now = _now()
@@ -260,6 +269,10 @@ class Registry:
                     env_json=env.model_dump_json(),
                 )
             )
+            if runtime is not None:  # m3s23
+                conn.execute(
+                    insert(runtimes).values(run_id=run_id, runtime_json=runtime.model_dump_json())
+                )
         return run_id
 
     def finish_run(self, run_id: str, status: RunStatus) -> None:
@@ -337,6 +350,15 @@ class Registry:
         with self.engine.connect() as conn:
             row = conn.execute(select(runs).where(runs.c.run_id == run_id)).mappings().first()
         return None if row is None else _to_record(row)
+
+    def get_runtime(self, run_id: str) -> RuntimeConfig | None:
+        """The runtime settings a run started with (m3s23). None if it recorded none: a run
+        started before m3s23 (they all ran in fp32 without the padding cut, try-its aside)."""
+        with self.engine.connect() as conn:
+            found = conn.execute(
+                select(runtimes.c.runtime_json).where(runtimes.c.run_id == run_id)
+            ).scalar()
+        return None if found is None else RuntimeConfig.model_validate_json(found)
 
     def list_runs(self, config_hash: str | None = None) -> list[RunRecord]:
         """All runs, or only the runs (seeds) of one experiment, oldest first."""

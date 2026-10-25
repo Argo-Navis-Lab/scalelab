@@ -10,7 +10,8 @@ import sys
 import tempfile
 import time
 import warnings
-from collections.abc import Generator, Sequence
+from collections import Counter
+from collections.abc import Generator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -71,7 +72,13 @@ from scalelab.costmodel.validate import (
     summarize,
 )
 from scalelab.models.transformer import Transformer
-from scalelab.rl.costing import measured_step, padding_cut, predict_rl_run, predict_step
+from scalelab.rl.costing import (
+    measured_step,
+    padding_cut,
+    predict_rl_run,
+    predict_run_step,
+    predict_step,
+)
 from scalelab.rl.evaluation import EvalResult, SampledResult
 from scalelab.rl.experiment import (
     grade_by_part,
@@ -208,6 +215,19 @@ def same_uncommitted_changes(recorded_env_json: str, env: EnvInfo) -> bool:
     return recorded.git.diff_sha256 == env.git.diff_sha256
 
 
+# m3s23: the settings a resumed run must keep. Each changes how its steps compute and how
+# long they take, and cost validate times a run's steps as one runtime's.
+SAME_ON_RESUME = ("precision", "padding_cut")
+
+
+def runtime_changes(recorded: RuntimeConfig, runtime: RuntimeConfig) -> list[str]:
+    """The SAME_ON_RESUME settings `runtime` changes, each as the override that keeps it."""
+    before, now = recorded.model_dump(), runtime.model_dump()
+    return [
+        f"runtime.{name}={before[name]}" for name in SAME_ON_RESUME if before[name] != now[name]
+    ]
+
+
 def resolve(
     experiment: Path, overrides: Sequence[str]
 ) -> tuple[ExperimentConfig, int, RuntimeConfig]:
@@ -286,6 +306,13 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
     if existing is not None and existing.status == "done":
         print("already done: nothing to do")
         return 0
+    recorded = None if existing is None else registry.get_runtime(run_id)
+    changed = [] if recorded is None else runtime_changes(recorded, runtime)  # m3s23
+    if changed:
+        raise UsageError(
+            f"run {run_id} started with {' '.join(changed)}: resume it the same way "
+            "(a run's steps all compute and are timed one way)"
+        )
     start = None  # RL's starting model, checked before anything is recorded
     if config.rl is not None:
         start = load_warm_start(config.rl.from_run, config.model, registry, home)
@@ -368,7 +395,9 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
     policy.stop_on_signals()  # from here on, Ctrl+C and SIGTERM mean "save and stop"
     try:
         if existing is None:
-            registry.add_run(config, seed, env, executor="local", deterministic=deterministic)
+            registry.add_run(  # m3s23: with its runtime
+                config, seed, env, executor="local", deterministic=deterministic, runtime=runtime
+            )
             print("started")
         else:
             registry.reopen_run(run_id)
@@ -653,6 +682,19 @@ def efficiencies_for(hardware_name: str) -> dict[Group, Efficiency] | None:
     return efficiencies
 
 
+def missing_half(efficiencies: Mapping[Group, Efficiency] | None) -> list[str]:
+    """The fp16 groups a calibration has no fit for: it was fitted before the fp16 benches
+    (m3s20). The datasheet's peaks (None) price fp16 too."""
+    if efficiencies is None:
+        return []
+    return sorted(set(HALF.values()) - set(efficiencies))
+
+
+def runtime_label(runtime: RuntimeConfig) -> str:
+    """How a run computed its steps (m3s23): its precision, and "cut" if the cut was on."""
+    return f"{runtime.precision} cut" if runtime.padding_cut else runtime.precision
+
+
 def cost_predict(
     experiment: Path, overrides: Sequence[str], hardware_name: str, session_hours: float
 ) -> int:
@@ -706,9 +748,12 @@ def cost_validate(hardware_name: str) -> int:
     hardware = hardware_spec(hardware_name)
     print(f"hardware:      {hardware_name}")
     efficiencies = efficiencies_for(hardware_name)
-    predictions: dict[str, StepPrediction] = {}  # config_hash -> its step: seeds share it
+    # m3s23: (config_hash, runtime) -> its step: seeds share it, runtimes don't
+    predictions: dict[tuple[str, str], StepPrediction] = {}
     checks: list[StepCheck] = []
-    left_out = 0
+    labels: dict[str, str] = {}  # run_id -> its runtime_label
+    left_out: Counter[str] = Counter()  # why -> how many runs
+    missing = missing_half(efficiencies)
     with registry_copy(home) as registry:
         for run in registry.list_runs():
             config_json = registry.experiment_json(run.config_hash)
@@ -718,31 +763,43 @@ def cost_validate(hardware_name: str) -> int:
             try:
                 config = ExperimentConfig.model_validate_json(config_json)
             except ValueError:  # recorded before a field was renamed or dropped
-                left_out += 1
+                left_out["with a config that no longer loads"] += 1
                 continue
             steps, measured = measured_step(read_metrics(home, run.run_id))
             if steps == 0:  # from before m2s29, or with telemetry off
-                left_out += 1
+                left_out["with no timed steps"] += 1
                 continue
-            if run.config_hash not in predictions:
-                predictions[run.config_hash] = predict_step(config, hardware, efficiencies)
-            checks.append(check_step(run.run_id, predictions[run.config_hash], steps, measured))
+            # m3s23: as the run ran. A run from before m3s23 recorded none: the defaults
+            runtime = registry.get_runtime(run.run_id) or RuntimeConfig()
+            if runtime.precision == "fp16" and missing:
+                left_out["in fp16, with no fp16 fit"] += 1
+                continue
+            label = labels[run.run_id] = runtime_label(runtime)
+            key = (run.config_hash, label)
+            if key not in predictions:
+                predictions[key] = predict_run_step(config, runtime, hardware, efficiencies)
+            checks.append(check_step(run.run_id, predictions[key], steps, measured))
     if not checks:
         since = "RL runs time their steps since m2s29, warm starts since m3s11"
         raise UsageError(f"no run on {hardware_name} timed its steps ({since})")
     line = f"runs:          {len(checks)} runs timed their steps"
     if left_out:
-        line += f" (left out {left_out}: no timed steps, or a config that no longer loads)"
+        why = "; ".join(f"{count} {reason}" for reason, count in left_out.items())
+        line += f" (left out {why})"
     print(line)
     parts = "".join(f"{part:>10}" for part in PARTS)
-    print(f"{'run':<30}{'steps':>6}{parts}  step, predicted vs measured")
+    print(f"{'run':<30}{'runtime':<10}{'steps':>6}{parts}  step, predicted vs measured")
     for check in checks:
         errors = "".join(  # m3s11: a warm start has train and step alone, blanks for the rest
             f"{check.errors[part]:>+10.1%}" if part in check.errors else " " * 10 for part in PARTS
         )
         step = f"{check.predicted['step']:.3f} s vs {check.measured['step']:.3f} s"
-        print(f"{check.run_id:<30}{check.steps:6d}{errors}  {step}")
+        print(f"{check.run_id:<30}{labels[check.run_id]:<10}{check.steps:6d}{errors}  {step}")
     summary = summarize(checks)
+    if len(set(labels.values())) > 1:  # m3s23: each runtime's steps on their own too
+        for label in sorted(set(labels.values())):
+            same = [check for check in checks if labels[check.run_id] == label]
+            summary[f"step, {label}"] = summarize(same)["step"]
     print(f"{'part':<15}{'runs':>6}{'MAPE':>8}{'bias':>8}{'worst':>8}")
     for part, errors in summary.items():
         mape, bias, worst = f"{errors.mape:.1%}", f"{errors.bias:+.1%}", f"{errors.worst:+.1%}"
@@ -769,14 +826,13 @@ def decision_report(
     last cost validate's error band there (validation.json), printing where both came from."""
     hardware = hardware_spec(hardware_name)
     efficiencies = efficiencies_for(hardware_name)
-    if change == "fp16" and efficiencies is not None:  # m3s20: fitted before the fp16 benches?
-        missing = sorted(set(HALF.values()) - set(efficiencies))
-        if missing:
-            raise UsageError(
-                f"the {hardware_name} calibration has no {', '.join(missing)}: run `scalelab "
-                f"bench --hardware {hardware_name} --precision fp16`, then `scalelab cost "
-                f"calibrate --hardware {hardware_name}`"
-            )
+    missing = missing_half(efficiencies)
+    if change == "fp16" and missing:  # m3s20: fitted before the fp16 benches?
+        raise UsageError(
+            f"the {hardware_name} calibration has no {', '.join(missing)}: run `scalelab "
+            f"bench --hardware {hardware_name} --precision fp16`, then `scalelab cost "
+            f"calibrate --hardware {hardware_name}`"
+        )
     if change == "fp16":
         candidate = predict_step(config, hardware, efficiencies, precision="fp16")
     else:

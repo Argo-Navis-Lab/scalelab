@@ -71,7 +71,7 @@ class DecisionReport(StrictModel):
             f"- speedup: {self.speedup:.2f}x, {3600 / before.seconds:,.0f} -> "
             f"{3600 / after.seconds:,.0f} steps an hour",
             f"- FLOPs a step: {before.flops:.3g} -> {after.flops:.3g} "
-            f"({after.flops / before.flops - 1:+.1%}): padding is computed, and counted",
+            f"({after.flops / before.flops - 1:+.1%}): budgets still count the padding (m3s16)",
         ]
         if self.validated is None:
             lines.append(
@@ -86,8 +86,11 @@ class DecisionReport(StrictModel):
                 f"{errors.bias:+.1%}, worst {errors.worst:+.1%}, {errors.samples} runs): the "
                 f"candidate's step {low:.4f}-{high:.4f} s"
             )
-            action = "worth building" if self.worth_building else "not worth building"
-            relation = "above" if self.worth_building else "within"
-            verdict = f"{action}: the saving, {self.saving:.1%}, is {relation} the error"
+            if self.worth_building:
+                verdict = f"worth building: the saving, {self.saving:.1%}, is above the error"
+            elif self.saving < -errors.mape:  # m3s16: slower, by more than the error
+                verdict = f"not worth building: it is {-self.saving:.1%} slower, beyond the error"
+            else:
+                verdict = f"not worth building: the saving, {self.saving:.1%}, is within the error"
         lines.append(f"- verdict: {verdict}")
         return "\n".join(lines) + "\n"

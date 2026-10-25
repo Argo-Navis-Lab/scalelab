@@ -1,5 +1,6 @@
 """Warm-start data: worked solutions as training batches, and the loss that teaches them."""
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -15,6 +16,7 @@ from scalelab.tasks.tokenizer import EOS, PAD, encode
 
 # A target the loss skips. -100 is also what F.cross_entropy skips when told nothing else.
 IGNORE = -100
+WARM_START_PIECES = 4  # m3s15: the padding cut runs a warm start's batch in 4 pieces
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,14 @@ def make_batch(examples: Sequence[Example]) -> Batch:
         inputs.append(read + [PAD] * padding)
         targets.append(wanted + [IGNORE] * padding)
     return Batch(torch.tensor(inputs), torch.tensor(targets))
+
+
+def make_pieces(examples: Sequence[Example], pieces: int = WARM_START_PIECES) -> list[Batch]:
+    """m3s16, the padding cut: the examples shortest first, lined up as `pieces` batches of
+    ceil(n / pieces) rows, each padded only to its own longest example."""
+    ordered = sorted(examples, key=lambda e: len(e.prompt) + len(e.answer))
+    rows = math.ceil(len(ordered) / pieces)
+    return [make_batch(ordered[start : start + rows]) for start in range(0, len(ordered), rows)]
 
 
 def warm_start_loss(logits: Tensor, targets: Tensor) -> Tensor:

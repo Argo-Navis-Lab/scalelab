@@ -111,6 +111,7 @@ def run_experiment(
     deterministic: bool | None = None,
     report: Report | None = None,
     sink: MetricsSink | None = None,
+    padding_cut: bool = False,
 ) -> list[StepMetrics]:
     """Warm-start the config's model on its task, resuming from the latest checkpoint in
     `checkpoint_dir` if there is one. Returns the metrics of every step this call ran.
@@ -119,7 +120,7 @@ def run_experiment(
     problems. The model trains on the GPU when there is one, otherwise on the CPU. With a
     `report`, the model is graded every config.eval.every steps and after the last one, and
     each grading goes to `report`. Grading changes nothing about training. Each step's laps
-    go to `sink`, if there is one (m3s11).
+    go to `sink`, if there is one (m3s11). `padding_cut`: runtime.padding_cut (m3s16).
     """
     seeds = seed_everything(seed, deterministic)  # PyTorch's generator now follows seeds.init
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -146,6 +147,7 @@ def run_experiment(
         eval_prompts(task, problem_type),
         on_step=grade,
         sink=sink,
+        padding_cut=padding_cut,
     )
 
 
@@ -161,6 +163,7 @@ def run_rl_experiment(
     sink: MetricsSink | None = None,
     on_anomaly: Callable[[AnomalyEvent], None] = ignore,
     on_step: Callable[[RLStepMetrics], None] | None = None,
+    padding_cut: bool = False,
 ) -> list[RLStepMetrics]:
     """RL on the config's task, starting from `start`: the model rl.from_run ended with,
     which is also the KL penalty's reference (a copy is kept; `start` itself is trained).
@@ -173,7 +176,8 @@ def run_rl_experiment(
     nothing about training, and its FLOPs aren't part of the budget. With a `sink`, every
     collector measures every step and records it there (telemetry), and the online
     detectors judge what they measured: each event goes to `on_anomaly`. `on_step`, if
-    given, is called with each step's metrics before that step is graded.
+    given, is called with each step's metrics before that step is graded. `padding_cut`:
+    runtime.padding_cut (m3s16).
     """
     if config.algo is None or config.rl is None:
         raise ValueError(f"{config.name} is not an RL experiment: it has no algo and rl sections")
@@ -228,4 +232,5 @@ def run_rl_experiment(
         on_step=after_step,
         hooks=hooks,
         monitor=monitor,
+        padding_cut=padding_cut,
     )

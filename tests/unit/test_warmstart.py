@@ -15,6 +15,7 @@ from scalelab.rl.warmstart import (
     Example,
     eval_prompts,
     make_batch,
+    make_pieces,
     sample_examples,
     warm_start_loss,
     worked_example,
@@ -200,3 +201,14 @@ def test_a_worked_solution_longer_than_the_context_is_refused():
     # The shortest 6-digit multiplication takes 293 tokens: the model could never write it all.
     with pytest.raises(ValueError, match="the context holds 256"):
         sample_examples(ArithmeticTask("*"), np.random.default_rng(0), 1, [6], 256)
+
+
+def test_the_padding_cut_lines_up_the_shortest_examples_first():
+    # m3s16: 8 examples in 4 pieces of 2, each as wide as its own longest example
+    examples = sample_examples(TASK, np.random.default_rng(0), 8, [2, 3, 4], 256)
+    pieces, whole = make_pieces(examples), make_batch(examples)
+    positions = sorted(len(e.prompt) + len(e.answer) - 1 for e in examples)
+    assert [piece.inputs.shape for piece in pieces] == [(2, width) for width in positions[1::2]]
+    assert sum(piece.tokens for piece in pieces) == whole.tokens
+    assert sum(piece.trained_tokens for piece in pieces) == whole.trained_tokens
+    assert sum(piece.inputs.numel() for piece in pieces) < whole.inputs.numel()

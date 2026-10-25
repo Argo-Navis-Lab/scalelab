@@ -15,7 +15,9 @@ from scalelab.telemetry.hooks import BackwardEvent, ForwardEvent, Hook, Optimize
 from scalelab.telemetry.timing import StepTimer
 
 
-def answer_logprobs(model: Transformer, batch: RolloutBatch, temperature: float) -> Tensor:
+def answer_logprobs(
+    model: Transformer, batch: RolloutBatch, temperature: float, micro_batch: int | None = None
+) -> Tensor:
     """(rows, width) each answer token's log-probability under `model` at `temperature`, in
     the same places as batch.tokens, and 0 outside the answers. On the model's device.
 
@@ -23,8 +25,18 @@ def answer_logprobs(model: Transformer, batch: RolloutBatch, temperature: float)
     t + 1. Gradients flow through the result, so the loss can be built on it; under
     torch.no_grad() it gives the log-probs a training step starts from. With top_p = 1 it
     must match batch.sampler_logprobs: the same policy, worked out by the trainer.
+
+    With a `micro_batch` (m3s16: the padding cut), one pass per `micro_batch` rows instead,
+    each cut to its own width: the same numbers, to rounding.
     """
     device = model.embed.weight.device
+    if micro_batch is not None:
+        logp = torch.zeros(batch.tokens.shape, device=device)
+        for start in range(0, len(batch.finish_reasons), micro_batch):
+            part = batch.rows(start, start + micro_batch)
+            width = part.tokens.shape[1]
+            logp[start : start + micro_batch, :width] = answer_logprobs(model, part, temperature)
+        return logp
     tokens = batch.tokens.to(device)
     logp = log_probs(model(tokens[:, :-1]), temperature)  # (rows, width - 1, vocab)
     next_logp = logp.gather(-1, tokens[:, 1:, None]).squeeze(-1)  # each next token's
@@ -58,6 +70,7 @@ def rl_update(
     hooks: Sequence[Hook] = (),
     step: int = 0,
     timer: StepTimer | None = None,
+    padding_cut: bool = False,
 ) -> list[UpdateMetrics]:
     """Train `model` on a scored batch: `epochs` updates, each a pass over all its rows in
     micro-batches of `micro_batch` rows (their gradients add up), then one optimizer step
@@ -72,6 +85,9 @@ def rl_update(
     gradients are complete (on_backward) and after each optimizer step (on_optimizer_step),
     told `step`: the RL step this is. `timer`, if given, laps "logprobs" once the old (and
     reference) log-probs are ready and "train" once the updates are done.
+
+    With `padding_cut` (m3s16), the rows run shortest first, so each micro-batch pads to
+    less, and the old and reference log-probs are worked out a micro-batch at a time too.
     """
     if algo.kl_coef > 0 and reference is None:
         raise ValueError("a KL penalty (kl_coef > 0) needs the reference model")
@@ -80,11 +96,16 @@ def rl_update(
     total = normalizer_size(mask, algo.normalizer)
     if not mask.any():  # m2s29: not total == 0, as "constant" counts rows, tokens or not
         return []
+    if padding_cut:  # m3s16: shortest first, so each micro-batch's rows are alike in length
+        order = torch.argsort(batch.lengths, stable=True)
+        batch = batch.reordered(order)
+        advantages, mask = advantages[order.to(device)], mask[order.to(device)]
+    pieces = micro_batch if padding_cut else None  # m3s16: the log-probs by micro-batch too
     with torch.no_grad():
-        old_logp = answer_logprobs(model, batch, temperature)
+        old_logp = answer_logprobs(model, batch, temperature, pieces)
         ref_logp = None
         if algo.kl_coef > 0 and reference is not None:
-            ref_logp = answer_logprobs(reference, batch, temperature)
+            ref_logp = answer_logprobs(reference, batch, temperature, pieces)
     if timer is not None:
         timer.lap("logprobs")
 

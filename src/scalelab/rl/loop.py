@@ -90,6 +90,7 @@ def rl_train[P](
     on_step: Callable[[RLStepMetrics], None] | None = None,
     hooks: Sequence[Hook] = (),
     monitor: AnomalyMonitor | None = None,
+    padding_cut: bool = False,  # m3s16: runtime.padding_cut, for rl_update
 ) -> list[RLStepMetrics]:
     """Train `model` with RL until config.flops FLOPs have been spent (or config.max_steps
     steps taken), resuming from the latest checkpoint in `checkpoint_dir` if there is one.
@@ -192,6 +193,7 @@ def rl_train[P](
                 reference=reference,
                 hooks=hooks,
                 timer=timer,
+                padding_cut=padding_cut,
                 step=step,
             )
         cost = rl_step_flops(

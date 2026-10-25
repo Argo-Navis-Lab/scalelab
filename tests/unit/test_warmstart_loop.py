@@ -161,3 +161,29 @@ def test_with_a_sink_each_step_records_its_laps_and_saving_writes_them(tmp_path:
         assert laps.keys() == {"system/data_s", "system/train_s", "system/step_s"}
         assert 0 < laps["system/data_s"] + laps["system/train_s"] <= laps["system/step_s"]
     assert metrics == train(tmp_path / "plain")[1]  # timing changes nothing about training
+
+
+# --- m3s16: the padding cut -----------------------------------------------------------------
+
+
+def test_the_padding_cut_makes_the_same_warm_start(tmp_path: Path):
+    # The same steps, tokens and FLOPs (counted as the whole batch padded), and the same
+    # losses and weights, to rounding.
+    config = WarmStartConfig(tokens=3_000, batch_size=16, lr=3e-3, warmup=0.1)
+    models: list[Transformer] = []
+    runs: list[list[StepMetrics]] = []
+    for padding_cut in (False, True):
+        model, home = make(), tmp_path / str(padding_cut)
+        rng = np.random.default_rng(0)
+        runs.append(
+            warm_start(
+                model, TASK, [2, 3], config, rng, home / "ckpt", home, padding_cut=padding_cut
+            )
+        )
+        models.append(model)
+    off, on = runs
+    assert [m.tokens for m in on] == [m.tokens for m in off]
+    assert [m.flops for m in on] == [m.flops for m in off]
+    assert [m.loss for m in on] == pytest.approx([m.loss for m in off], abs=1e-5)
+    for a, b in zip(models[0].parameters(), models[1].parameters(), strict=True):
+        torch.testing.assert_close(a, b, atol=2e-4, rtol=1e-4)  # Adam magnifies rounding

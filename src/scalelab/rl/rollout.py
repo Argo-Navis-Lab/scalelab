@@ -54,6 +54,19 @@ class RolloutBatch:
             policy_version=self.policy_version,
         )
 
+    def reordered(self, order: Tensor) -> "RolloutBatch":
+        """The rows in `order` (m3s16: shortest first, for the padding cut). They are no
+        longer in groups, so this is for training, once the advantages are worked out."""
+        return RolloutBatch(
+            tokens=self.tokens[order],
+            prompt_lengths=self.prompt_lengths[order],
+            lengths=self.lengths[order],
+            finish_reasons=[self.finish_reasons[row] for row in order.tolist()],
+            sampler_logprobs=self.sampler_logprobs[order],
+            group_ids=self.group_ids[order],
+            policy_version=self.policy_version,
+        )
+
     def answers(self) -> list[list[int]]:
         """Each row's answer tokens, with <eos> at the end when it was written."""
         starts, ends = self.prompt_lengths.tolist(), self.lengths.tolist()

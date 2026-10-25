@@ -22,7 +22,7 @@ from scalelab.costmodel.specs import HardwareSpec, ModelSpec
 from scalelab.costmodel.validate import PARTS
 from scalelab.rl.experiment import make_task
 from scalelab.rl.loop import GENERATION_BATCH, sample_problems
-from scalelab.rl.warmstart import sample_examples
+from scalelab.rl.warmstart import WARM_START_PIECES, sample_examples
 from scalelab.tasks.tokenizer import encode
 from scalelab.telemetry.sink import MetricRow
 
@@ -30,7 +30,6 @@ ANSWER_SAMPLES = 1000  # problems drawn per difficulty, for the answers' lengths
 SPEC_SEED = 0  # they're drawn from their own generator: a config always gets the same step
 SKIPPED_STEPS = 1  # step 1 also warms up (first allocations, kernel choices): left out (m3s10)
 TIMED = {f"system/{part}_s": part for part in PARTS}  # telemetry's laps of a step (m2s29)
-WARM_START_PIECES = 4  # m3s15: the padding cut runs a warm start's batch in 4 pieces
 
 
 def rl_step_spec(config: ExperimentConfig) -> RLStepSpec:

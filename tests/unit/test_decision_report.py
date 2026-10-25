@@ -65,3 +65,10 @@ def test_a_saving_within_the_error_is_not_worth_building() -> None:
 def test_a_report_reads_back_from_its_json() -> None:
     decision = report(step(1.0, 1.5), ERRORS)
     assert DecisionReport.model_validate_json(decision.model_dump_json()) == decision
+
+
+def test_a_change_slower_by_more_than_the_error_says_so() -> None:
+    # m3s16: the A100's m1 warm-start cut (+123.8%) read "the saving, -123.8%, is within"
+    decision = report(step(1.0, 3.0), ERRORS)  # 4 s a step instead of 3
+    assert not decision.worth_building
+    assert "not worth building: it is 33.3% slower, beyond the error\n" in decision.markdown()

@@ -20,7 +20,7 @@ from scalelab.core.config import RLConfig, StrictModel, WarmStartConfig
 from scalelab.costmodel.ops import count_flops
 from scalelab.costmodel.specs import ModelSpec, WorkloadSpec
 from scalelab.models.transformer import Transformer
-from scalelab.rl.warmstart import make_batch, sample_examples, warm_start_loss
+from scalelab.rl.warmstart import make_batch, make_pieces, sample_examples, warm_start_loss
 from scalelab.tasks.base import Task
 from scalelab.telemetry.sink import MetricsSink
 from scalelab.telemetry.timing import StepTimer
@@ -73,6 +73,7 @@ def warm_start[P](
     stop_after: int | None = None,
     on_step: Callable[[StepMetrics], None] | None = None,
     sink: MetricsSink | None = None,
+    padding_cut: bool = False,
 ) -> list[StepMetrics]:
     """Train `model` on worked solutions until config.tokens positions have been read,
     resuming from the latest checkpoint in `checkpoint_dir` if there is one.
@@ -82,6 +83,9 @@ def warm_start[P](
     what RL will start from. `stop_after=k` pretends the job is interrupted after step k.
     `on_step`, if given, is called with each step's metrics before any saving. With a `sink`,
     each step's laps go there as RL's telemetry names them: system/data_s, train_s, step_s.
+
+    With `padding_cut` (m3s16), each step runs in WARM_START_PIECES pieces, shortest rows
+    first, each padded to its own longest: the same update (to rounding), less padding.
     """
     policy = policy or CheckpointPolicy()
     optimizer = make_optimizer(model, config)
@@ -103,21 +107,26 @@ def warm_start[P](
     timer = StepTimer(device)  # m3s11: CUDA-synced laps, as in RL (m2s29)
     while tokens < config.tokens:
         timer.start()
-        batch = make_batch(
-            sample_examples(task, data_rng, config.batch_size, difficulties, context, excluded)
+        examples = sample_examples(
+            task, data_rng, config.batch_size, difficulties, context, excluded
         )
+        batch = make_batch(examples)
+        pieces = make_pieces(examples) if padding_cut else [batch]  # m3s16
         step += 1
         tokens += batch.tokens
-        sequences, width = batch.inputs.shape  # the padding is computed too, so it's counted
+        sequences, width = batch.inputs.shape  # m3s16: the whole batch padded, cut or not
         flops += count_flops(spec, WorkloadSpec(phase="train", batch=sequences, tokens=width)).total
         lr = learning_rate(config, min(1.0, tokens / config.tokens))
         for group in optimizer.param_groups:
             group["lr"] = lr
         timer.lap("data")  # drawing the problems, the batch, the bookkeeping
-
-        loss = warm_start_loss(model(batch.inputs.to(device)), batch.targets.to(device))
         optimizer.zero_grad()
-        loss.backward()
+        loss = torch.zeros((), device=device)
+        for piece in pieces:  # m3s16: each piece's share of the batch's mean, by trained tokens
+            share = piece.trained_tokens / batch.trained_tokens
+            piece_loss = warm_start_loss(model(piece.inputs.to(device)), piece.targets.to(device))
+            (piece_loss * share).backward()
+            loss = loss + piece_loss.detach() * share
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
         optimizer.step()
         timer.lap("train")  # forward, backward, clipping, the update

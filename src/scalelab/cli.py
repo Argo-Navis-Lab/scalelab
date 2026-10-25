@@ -377,7 +377,15 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
             sink = MetricsSink(home, run_id) if runtime.telemetry else None
             if start is None:
                 metrics = run_experiment(
-                    config, seed, checkpoints, home, policy, deterministic, report, sink
+                    config,
+                    seed,
+                    checkpoints,
+                    home,
+                    policy,
+                    deterministic,
+                    report,
+                    sink,
+                    padding_cut=runtime.padding_cut,  # m3s16
                 )
             else:
                 metrics = run_rl_experiment(
@@ -391,6 +399,7 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
                     rl_report,
                     sink,
                     record_anomaly,
+                    padding_cut=runtime.padding_cut,  # m3s16
                 )
         except RunHalted as halted:
             registry.finish_run(run_id, "failed")

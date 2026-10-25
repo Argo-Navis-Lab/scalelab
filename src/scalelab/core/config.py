@@ -202,6 +202,12 @@ class RuntimeConfig(StrictModel):
     # what it costs; `scalelab overhead` measures exactly that. A warm start has no collectors,
     # only its step times (m3s11), which False turns off too.
     telemetry: bool = True
+    # m3s16: the padding cut. A batch's rows run shortest first, in micro-batches each padded
+    # only to its own longest row: RL's log-probs and updates in rl.micro_batch rows, a warm
+    # start's step in WARM_START_PIECES pieces. The same math (to rounding), so the same run.
+    # FLOPs are still counted as the whole batch padded, so budgets buy the same steps. Off
+    # by default: m3s15's reports favor it on the T4, not on the A100.
+    padding_cut: bool = False
 
 
 # --- composing a config from several files --------------------------------------------

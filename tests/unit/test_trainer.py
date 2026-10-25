@@ -1,7 +1,8 @@
 """Trainer tests. Log-probs: one forward pass agrees with what the sampler recorded (at the
 same temperature only), nothing leaks outside the answers, and gradients flow. Updates:
 micro-batches add up to the whole batch, clipping and the KL start at 0 and grow, the
-gradient is clipped, and nothing to learn changes nothing."""
+gradient is clipped, and nothing to learn changes nothing. The padding cut (m3s16) changes
+only how much padding is computed."""
 
 import copy
 
@@ -11,8 +12,9 @@ import torch
 from scalelab.core.config import AlgoConfig, ModelConfig, Normalizer, SamplingParams
 from scalelab.models.transformer import Transformer
 from scalelab.rl.rollout import RolloutBatch, generate
-from scalelab.rl.trainer import answer_logprobs, rl_update
+from scalelab.rl.trainer import UpdateMetrics, answer_logprobs, rl_update
 from scalelab.tasks.tokenizer import encode
+from scalelab.telemetry.hooks import ForwardEvent, Hook
 
 SHORT = ModelConfig(name="short", n_layers=2, d_model=64, n_heads=1, context=32)
 PROMPTS = [encode("<bos>12+34="), encode("<bos>123*456="), encode("<bos>56-78=")]  # 7, 9, 7
@@ -223,3 +225,81 @@ def test_nothing_to_learn_changes_nothing(normalizer: Normalizer):
     assert rl_update(model, optimizer, batch, ADVANTAGES, mask, settings, temperature=1.0) == []
     for p, s in zip(model.parameters(), start, strict=True):
         assert torch.equal(p, s)
+
+
+# --- m3s16: the padding cut -----------------------------------------------------------------
+
+
+class Lengths(Hook):
+    """Each micro-batch's row lengths, in the order the update ran them."""
+
+    def __init__(self) -> None:
+        self.parts: list[list[int]] = []
+
+    def on_forward(self, event: ForwardEvent) -> None:
+        self.parts.append(event.batch.lengths.tolist())
+
+
+def test_log_probs_by_micro_batch_are_the_same_numbers():
+    model = make()
+    batch = roll(model, 1.0)
+    with torch.no_grad():
+        whole = answer_logprobs(model, batch, 1.0)
+        parts = answer_logprobs(model, batch, 1.0, micro_batch=2)
+    assert parts.shape == whole.shape
+    torch.testing.assert_close(parts, whole)
+
+
+@pytest.mark.parametrize("normalizer", ["seq_mean", "token_mean", "constant"])
+def test_the_padding_cut_makes_the_same_update(normalizer: Normalizer):
+    # Shortest first changes which rows share a micro-batch, never the batch's gradient.
+    batch = roll(make(), 1.0)
+    trained: list[Transformer] = []
+    results: list[list[UpdateMetrics]] = []
+    for padding_cut in (False, True):
+        model = make()
+        results.append(
+            rl_update(
+                model,
+                torch.optim.SGD(model.parameters(), lr=0.1),
+                batch,
+                ADVANTAGES,
+                batch.response_mask,
+                algo(normalizer, kl_coef=0.04),
+                temperature=1.0,
+                micro_batch=3,
+                grad_clip=1e9,  # no clipping: the gradients themselves must match
+                reference=make(),
+                padding_cut=padding_cut,
+            )
+        )
+        trained.append(model)
+    for a, b in zip(trained[0].parameters(), trained[1].parameters(), strict=True):
+        torch.testing.assert_close(a, b)
+    (off,), (on,) = results
+    assert on.loss == pytest.approx(off.loss, abs=1e-6)
+    assert on.grad_norm == pytest.approx(off.grad_norm, rel=1e-5)
+    assert on.kl == pytest.approx(off.kl, abs=1e-6)
+
+
+def test_the_padding_cut_runs_the_shortest_rows_first():
+    batch = roll(make(), 1.0)
+    computed: dict[bool, int] = {}  # positions the micro-batches computed, padding and all
+    for padding_cut in (False, True):
+        model, lengths = make(), Lengths()
+        rl_update(
+            model,
+            torch.optim.SGD(model.parameters(), lr=0.1),
+            batch,
+            ADVANTAGES,
+            batch.response_mask,
+            algo(),
+            temperature=1.0,
+            micro_batch=3,
+            hooks=[lengths],
+            padding_cut=padding_cut,
+        )
+        rows = [length for part in lengths.parts for length in part]
+        assert rows == (sorted(rows) if padding_cut else batch.lengths.tolist())
+        computed[padding_cut] = sum(len(part) * max(part) for part in lengths.parts)
+    assert computed[True] <= computed[False]  # micro-batches of one size: sorted pads least

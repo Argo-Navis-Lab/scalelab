@@ -16,7 +16,7 @@ from scalelab.core.checkpoint import (
     restore_rng,
     save_checkpoint,
 )
-from scalelab.core.config import AlgoConfig, RLConfig, StrictModel
+from scalelab.core.config import AlgoConfig, Precision, RLConfig, StrictModel
 from scalelab.costmodel.specs import ModelSpec
 from scalelab.models.transformer import Transformer
 from scalelab.rl.advantages import advantages
@@ -91,6 +91,7 @@ def rl_train[P](
     hooks: Sequence[Hook] = (),
     monitor: AnomalyMonitor | None = None,
     padding_cut: bool = False,  # m3s16: runtime.padding_cut, for rl_update
+    precision: Precision = "fp32",  # m3s22: runtime.precision, for generate and rl_update
 ) -> list[RLStepMetrics]:
     """Train `model` with RL until config.flops FLOPs have been spent (or config.max_steps
     steps taken), resuming from the latest checkpoint in `checkpoint_dir` if there is one.
@@ -113,9 +114,14 @@ def rl_train[P](
     A `monitor` judges each step once on_step_end is over. An event of severity SNAPSHOT or
     HALT saves the step's state in the SNAPSHOTS folder inside `checkpoint_dir`, which
     pruning leaves alone; HALT then raises RunHalted. Checkpoints keep the monitor's state.
+
+    With `precision` "fp16" (m3s22), sampling and training run under autocast float16, and a
+    GradScaler scales the losses; checkpoints keep its state (fp32's scaler is off).
     """
     policy = policy or CheckpointPolicy()
     optimizer = make_optimizer(model, config)
+    device = model.embed.weight.device
+    scaler = torch.amp.GradScaler(device.type, enabled=precision == "fp16")  # m3s22: fp32: off
     spec = ModelSpec.from_config(model.config)
     context = model.config.context
 
@@ -125,6 +131,8 @@ def rl_train[P](
         step, state = load_checkpoint(latest, home)
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])
+        if state.get("scaler"):  # m3s22: fp32 checkpoints (and older ones) keep none
+            scaler.load_state_dict(state["scaler"])
         data_rng.bit_generator.state = state["data_rng"]
         generator.set_state(state["sampling"])
         restore_rng(state["rng"])
@@ -140,6 +148,7 @@ def rl_train[P](
         state = {
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "scaler": scaler.state_dict(),  # m3s22: {} in fp32
             "data_rng": data_rng.bit_generator.state,
             "sampling": generator.get_state(),
             "rng": capture_rng(),
@@ -164,6 +173,7 @@ def rl_train[P](
             generator,
             policy_version=step - 1,  # the number of steps that have changed the weights
             batch_size=GENERATION_BATCH,
+            precision=precision,  # m3s22
         )
         timer.lap("generate")
         rewards = reward_values(score_rollouts(task, problems, batch), algo.format_weight)
@@ -193,7 +203,8 @@ def rl_train[P](
                 reference=reference,
                 hooks=hooks,
                 timer=timer,
-                padding_cut=padding_cut,
+                precision=precision,  # m3s22
+                scaler=scaler,
                 step=step,
             )
         cost = rl_step_flops(

@@ -770,3 +770,40 @@ def test_the_sampler_agrees_with_the_trainer_unless_it_truncates(tmp_path: Path)
     # 80% of it, and the sampler's probabilities are the policy's over that: ratios near 0.8.
     assert 0.1 < metrics[0.8]["mismatch/logp_mean"] < 0.4
     assert 0.1 < metrics[0.8]["mismatch/ratio_max"] < 0.3
+
+
+# --- added in m3s22: the GradScaler's metrics, and the updates it skips ---------------------
+
+
+def test_a_skipped_fp16_update_is_recorded_but_is_no_numerical_fault(tmp_path: Path):
+    sink = MetricsSink(tmp_path, "run-a")
+    hooks: list[Hook] = [NumericsCollector(sink), OptimizationCollector(sink)]
+    model = make()
+    batch = roll(model, 4)
+    # Step 1 scales by 2**16, the default; step 2 by infinity, which overflows every gradient.
+    for step, init_scale in ((1, 2.0**16), (2, math.inf)):
+        rl_update(
+            model,
+            torch.optim.SGD(model.parameters(), lr=0.1),
+            batch,
+            ADVANTAGES,
+            batch.response_mask,
+            preset("rloo"),  # no KL penalty, so no reference
+            temperature=1.0,
+            hooks=hooks,
+            step=step,
+            precision="fp16",
+            scaler=torch.amp.GradScaler("cpu", init_scale=init_scale),
+        )
+        for hook in hooks:
+            hook.on_step_end(ended(step))
+    clean, skipped = found(sink, tmp_path, step=1), found(sink, tmp_path, step=2)
+    assert (clean["optim/loss_scale"], clean["optim/skipped"]) == (2.0**16, 0.0)
+    assert (skipped["optim/loss_scale"], skipped["optim/skipped"]) == (math.inf, 1.0)
+    assert not math.isfinite(skipped["optim/grad_norm"])  # the overflow is there to see
+    counts = [
+        skipped[f"numerics/{group}_{kind}"]
+        for group in NUMERICS_GROUPS
+        for kind in "nan inf".split()
+    ]
+    assert counts == [0.0] * 8  # but it isn't a fault: nothing for the divergence detector

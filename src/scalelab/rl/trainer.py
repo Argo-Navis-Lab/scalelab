@@ -6,7 +6,8 @@ from collections.abc import Sequence
 import torch
 from torch import Tensor
 
-from scalelab.core.config import AlgoConfig, StrictModel
+from scalelab.core.config import AlgoConfig, Precision, StrictModel
+from scalelab.models.precision import autocast
 from scalelab.models.transformer import Transformer
 from scalelab.rl.losses import clip_engaged, kl_k3, normalizer_size, rl_loss
 from scalelab.rl.rollout import RolloutBatch
@@ -16,7 +17,11 @@ from scalelab.telemetry.timing import StepTimer
 
 
 def answer_logprobs(
-    model: Transformer, batch: RolloutBatch, temperature: float, micro_batch: int | None = None
+    model: Transformer,
+    batch: RolloutBatch,
+    temperature: float,
+    micro_batch: int | None = None,
+    precision: Precision = "fp32",
 ) -> Tensor:
     """(rows, width) each answer token's log-probability under `model` at `temperature`, in
     the same places as batch.tokens, and 0 outside the answers. On the model's device.
@@ -28,6 +33,9 @@ def answer_logprobs(
 
     With a `micro_batch` (m3s16: the padding cut), one pass per `micro_batch` rows instead,
     each cut to its own width: the same numbers, to rounding.
+
+    With `precision` "fp16" (m3s22), the forward pass runs under autocast float16; the
+    log-probs are float32 all the same (see log_probs).
     """
     device = model.embed.weight.device
     if micro_batch is not None:
@@ -35,10 +43,14 @@ def answer_logprobs(
         for start in range(0, len(batch.finish_reasons), micro_batch):
             part = batch.rows(start, start + micro_batch)
             width = part.tokens.shape[1]
-            logp[start : start + micro_batch, :width] = answer_logprobs(model, part, temperature)
+            logp[start : start + micro_batch, :width] = answer_logprobs(
+                model, part, temperature, precision=precision
+            )
         return logp
     tokens = batch.tokens.to(device)
-    logp = log_probs(model(tokens[:, :-1]), temperature)  # (rows, width - 1, vocab)
+    with autocast(precision, device):  # m3s22: one region a forward pass
+        logits = model(tokens[:, :-1])
+    logp = log_probs(logits, temperature)  # (rows, width - 1, vocab)
     next_logp = logp.gather(-1, tokens[:, 1:, None]).squeeze(-1)  # each next token's
     aligned = torch.cat([torch.zeros_like(next_logp[:, :1]), next_logp], dim=1)  # (rows, width)
     # where, not a multiplication: PAD's log-prob is -inf, and -inf * 0 would be NaN.
@@ -71,6 +83,8 @@ def rl_update(
     step: int = 0,
     timer: StepTimer | None = None,
     padding_cut: bool = False,
+    precision: Precision = "fp32",
+    scaler: torch.amp.GradScaler | None = None,
 ) -> list[UpdateMetrics]:
     """Train `model` on a scored batch: `epochs` updates, each a pass over all its rows in
     micro-batches of `micro_batch` rows (their gradients add up), then one optimizer step
@@ -88,10 +102,17 @@ def rl_update(
 
     With `padding_cut` (m3s16), the rows run shortest first, so each micro-batch pads to
     less, and the old and reference log-probs are worked out a micro-batch at a time too.
+
+    With `precision` "fp16" (m3s22), every forward pass runs under autocast float16, and
+    `scaler` (by default a fresh one) scales each loss up before backward. The gradients are
+    unscaled before the hooks see them and before clipping; an update whose gradients
+    overflowed is skipped (the scaler then halves its scale), and its grad_norm isn't finite.
     """
     if algo.kl_coef > 0 and reference is None:
         raise ValueError("a KL penalty (kl_coef > 0) needs the reference model")
     device = model.embed.weight.device
+    if scaler is None:  # m3s22: fp32's is off: a pass-through
+        scaler = torch.amp.GradScaler(device.type, enabled=precision == "fp16")
     advantages, mask = advantages.to(device), mask.to(device)
     total = normalizer_size(mask, algo.normalizer)
     if not mask.any():  # m2s29: not total == 0, as "constant" counts rows, tokens or not
@@ -102,10 +123,10 @@ def rl_update(
         advantages, mask = advantages[order.to(device)], mask[order.to(device)]
     pieces = micro_batch if padding_cut else None  # m3s16: the log-probs by micro-batch too
     with torch.no_grad():
-        old_logp = answer_logprobs(model, batch, temperature, pieces)
+        old_logp = answer_logprobs(model, batch, temperature, pieces, precision)
         ref_logp = None
         if algo.kl_coef > 0 and reference is not None:
-            ref_logp = answer_logprobs(reference, batch, temperature, pieces)
+            ref_logp = answer_logprobs(reference, batch, temperature, pieces, precision)
     if timer is not None:
         timer.lap("logprobs")
 
@@ -121,7 +142,7 @@ def rl_update(
             part_old, part_mask = old_logp[start:end, :width], mask[start:end, :width]
             part_adv = advantages[start:end]
             part_ref = None if ref_logp is None else ref_logp[start:end, :width]
-            logp = answer_logprobs(model, part, temperature)
+            logp = answer_logprobs(model, part, temperature, precision=precision)
             loss = rl_loss(
                 logp,
                 part_old,
@@ -149,7 +170,8 @@ def rl_update(
             for hook in hooks:
                 hook.on_forward(forward)
             share = normalizer_size(part_mask, algo.normalizer) / total
-            (loss * share).backward()  # the micro-batches' gradients add up to the batch's
+            # The micro-batches' gradients add up to the batch's (m3s22: scaled; fp32: as is).
+            scaler.scale(loss * share).backward()
             with torch.no_grad():
                 ratio = (logp - part_old).exp()
                 engaged = clip_engaged(ratio, part_adv, algo.clip_low, algo.clip_high)
@@ -157,11 +179,14 @@ def rl_update(
                 clipped += int((engaged & part_mask).sum())
                 if part_ref is not None:
                     kl_sum += float(kl_k3(logp, part_ref)[part_mask].sum())
+        scaler.unscale_(optimizer)  # m3s22: the hooks and clipping see the true gradients
         backward = BackwardEvent(step=step, epoch=epoch, model=model)
         for hook in hooks:
             hook.on_backward(backward)
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        optimizer.step()
+        loss_scale = scaler.get_scale()  # m3s22: what this update's gradients were scaled by
+        scaler.step(optimizer)  # m3s22: skips the update if a gradient is inf or nan
+        scaler.update()  # halves the scale after a skip, doubles it after 2,000 clean updates
         stepped = OptimizerStepEvent(
             step=step,
             epoch=epoch,
@@ -170,6 +195,8 @@ def rl_update(
             loss=loss_sum,
             grad_norm=grad_norm.item(),
             grad_clip=grad_clip,
+            loss_scale=loss_scale if scaler.is_enabled() else None,  # m3s22
+            skipped=scaler.is_enabled() and not grad_norm.isfinite().item(),
         )
         for hook in hooks:
             hook.on_optimizer_step(stepped)

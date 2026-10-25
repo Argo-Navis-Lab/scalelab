@@ -58,6 +58,8 @@ class OptimizerStepEvent:
     loss: float  # the update's loss over the whole batch, before the step
     grad_norm: float  # the gradient's size before clipping
     grad_clip: float  # the size clipping cuts a bigger gradient down to
+    loss_scale: float | None = None  # m3s22: the GradScaler's scale for this update; fp32: None
+    skipped: bool = False  # m3s22: the scaler skipped the update (its gradients overflowed)
 
 
 @dataclass(frozen=True)

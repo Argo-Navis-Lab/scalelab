@@ -444,15 +444,24 @@ def test_cost_measure_runs_on_the_device_it_predicts(
 # --- m3s21: fp16 -----------------------------------------------------------------------------
 
 
-def test_fp16_reaches_the_warm_start_and_rl_refuses_it_until_m3s22(
-    home: Path, capsys: pytest.CaptureFixture[str]
-):
-    assert main(["run", str(HELLO), "runtime.precision=fp16"]) == 0
+SCALER = ("optim/loss_scale", "optim/skipped")  # m3s22
+
+
+def test_fp16_reaches_warm_starts_and_rl(home: Path, capsys: pytest.CaptureFixture[str]):
+    assert main(["run", str(HELLO), *SMALL, "runtime.precision=fp16"]) == 0
     assert "precision:     fp16" in capsys.readouterr().out
-    (run,) = Registry.sqlite(home / "registry.db").list_runs()
-    latest = latest_checkpoint(home / "checkpoints" / run.run_id)
-    assert latest is not None
-    assert load_checkpoint(latest, home)[1]["scaler"]["growth_interval"] == 2000  # it had one
-    missing = "rl.from_run=0123456789abcdef-s0-01234567"
-    assert main(["run", str(RL), *SMALL_RL, missing, "runtime.precision=fp16"]) == 2
-    assert "runtime.precision=fp16: RL runs in fp32 until m3s22" in capsys.readouterr().err
+    (warm_start,) = Registry.sqlite(home / "registry.db").list_runs()
+    fp16 = [f"rl.from_run={warm_start.run_id}", "runtime.precision=fp16"]  # m3s22: RL too
+    assert main(["run", str(RL), *SMALL_RL, *fp16]) == 0
+    steps = int(re.findall(r"done: ran (\d+) steps", capsys.readouterr().out)[-1])
+    runs = Registry.sqlite(home / "registry.db").list_runs()
+    (rl,) = [run for run in runs if run.run_id != warm_start.run_id]
+    for run in (warm_start, rl):
+        latest = latest_checkpoint(home / "checkpoints" / run.run_id)
+        assert latest is not None
+        assert load_checkpoint(latest, home)[1]["scaler"]["growth_interval"] == 2000  # it had one
+    rows = read_metrics(home, rl.run_id)
+    scaler = [(row.metric, row.value) for row in rows if row.metric in SCALER]
+    assert sorted(set(scaler)) == [("optim/loss_scale", 2.0**16), ("optim/skipped", 0.0)]
+    assert len(scaler) == 2 * steps  # both, at every step
+    assert all(row.value == 0 for row in rows if row.metric.startswith("numerics/"))

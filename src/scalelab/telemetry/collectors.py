@@ -138,27 +138,37 @@ class PolicyCollector(Hook):
 
 # What OptimizationCollector records, in order, each named "optim/<name>".
 OPTIMIZATION_METRICS = ("loss", "grad_norm", "grad_clipped")
+# m3s22: and when a GradScaler ran (fp16): the loss scale, and the share of updates it skipped.
+SCALER_METRICS = ("loss_scale", "skipped")
 
 
 class OptimizationCollector(Hook):
     """Every step's updates (one per epoch), each metric a mean over them: the loss over the
     whole batch before the update, the gradient's global norm before clipping, and the share
-    of updates whose gradient clipping cut down. A step with no update records nothing."""
+    of updates whose gradient clipping cut down. A step with no update records nothing. In
+    fp16 (m3s22) also the loss scale and the share of updates the GradScaler skipped."""
 
     def __init__(self, sink: MetricsSink) -> None:
         self.sink = sink
         self.updates: list[tuple[float, float, float]] = []  # loss, norm, 1.0 if clipped
+        self.scaled: list[tuple[float, float]] = []  # m3s22: loss scale, 1.0 if skipped
 
     def on_optimizer_step(self, event: OptimizerStepEvent) -> None:
         clipped = float(event.grad_norm > event.grad_clip)
         self.updates.append((event.loss, event.grad_norm, clipped))
+        if event.loss_scale is not None:  # m3s22: a GradScaler ran
+            self.scaled.append((event.loss_scale, float(event.skipped)))
 
     def on_step_end(self, event: StepEndEvent) -> None:
         if self.updates:
             columns = zip(*self.updates, strict=True)  # the losses, the norms, the clipped
             for name, values in zip(OPTIMIZATION_METRICS, columns, strict=True):
                 self.sink.record(event.step, f"optim/{name}", sum(values) / len(values))
-        self.updates = []
+        if self.scaled:  # m3s22
+            columns = zip(*self.scaled, strict=True)  # the scales, the skips
+            for name, values in zip(SCALER_METRICS, columns, strict=True):
+                self.sink.record(event.step, f"optim/{name}", sum(values) / len(values))
+        self.updates, self.scaled = [], []
 
 
 class SystemCollector(Hook):
@@ -214,7 +224,10 @@ class NumericsCollector(Hook):
     trainer's log-probs of the answer tokens and in its losses (every micro-batch of every
     epoch), in the gradients before clipping and in the weights after each update. Counted
     each time they are shown, so recorded when the step ends. Any count above 0 is a
-    numerical fault, whatever the algorithm is doing. A step with no update records nothing."""
+    numerical fault, whatever the algorithm is doing. A step with no update records nothing.
+
+    Except (m3s22) the gradients of an update the GradScaler skipped: an overflow it caught
+    is how fp16 finds its scale, not a fault (optim/skipped shows it)."""
 
     def __init__(self, sink: MetricsSink) -> None:
         self.sink = sink
@@ -230,6 +243,8 @@ class NumericsCollector(Hook):
         self.counts["grads"].append(nonfinite(grads))
 
     def on_optimizer_step(self, event: OptimizerStepEvent) -> None:
+        if event.skipped:  # m3s22: counted as none
+            self.counts["grads"][-1].zero_()
         self.counts["weights"].append(nonfinite(event.model.parameters()))
 
     def on_step_end(self, event: StepEndEvent) -> None:

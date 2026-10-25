@@ -19,9 +19,10 @@ def log_probs(logits: Tensor, temperature: float) -> Tensor:
 
     The sampler draws from these and the trainer recomputes them, so both must come from
     this one function: a temperature applied by one and not the other is a classic RL bug.
+    Always in float32, even from autocast's float16 logits (m3s22).
     """
     never = torch.tensor(NEVER_WRITTEN, device=logits.device)
-    scaled = (logits / temperature).index_fill(-1, never, float("-inf"))
+    scaled = (logits.float() / temperature).index_fill(-1, never, float("-inf"))
     return F.log_softmax(scaled, dim=-1)
 
 

@@ -167,3 +167,10 @@ def test_with_top_p_a_draws_log_probs_are_the_samplers_not_the_policys():
     assert torch.equal(logp, sampler.gather(-1, tokens[:, None]).squeeze(-1))
     # The nucleus holds less than all the probability, so each kept token's share grows.
     assert torch.all(logp > policy.gather(-1, tokens[:, None]).squeeze(-1))
+
+
+def test_the_policy_is_float32_even_from_float16_logits():  # m3s22: autocast's logits
+    logits = torch.randn(3, VOCAB_SIZE, generator=torch.Generator().manual_seed(0)).half()
+    logp = log_probs(logits, 1.0)
+    assert logp.dtype == torch.float32
+    torch.testing.assert_close(logp, log_probs(logits.float(), 1.0))

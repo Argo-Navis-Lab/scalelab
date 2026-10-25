@@ -5,16 +5,17 @@ gradient is clipped, and nothing to learn changes nothing. The padding cut (m3s1
 only how much padding is computed."""
 
 import copy
+import math
 
 import pytest
 import torch
 
-from scalelab.core.config import AlgoConfig, ModelConfig, Normalizer, SamplingParams
+from scalelab.core.config import AlgoConfig, ModelConfig, Normalizer, Precision, SamplingParams
 from scalelab.models.transformer import Transformer
 from scalelab.rl.rollout import RolloutBatch, generate
 from scalelab.rl.trainer import UpdateMetrics, answer_logprobs, rl_update
 from scalelab.tasks.tokenizer import encode
-from scalelab.telemetry.hooks import ForwardEvent, Hook
+from scalelab.telemetry.hooks import ForwardEvent, Hook, OptimizerStepEvent
 
 SHORT = ModelConfig(name="short", n_layers=2, d_model=64, n_heads=1, context=32)
 PROMPTS = [encode("<bos>12+34="), encode("<bos>123*456="), encode("<bos>56-78=")]  # 7, 9, 7
@@ -303,3 +304,100 @@ def test_the_padding_cut_runs_the_shortest_rows_first():
         assert rows == (sorted(rows) if padding_cut else batch.lengths.tolist())
         computed[padding_cut] = sum(len(part) * max(part) for part in lengths.parts)
     assert computed[True] <= computed[False]  # micro-batches of one size: sorted pads least
+
+
+# --- added in m3s22: fp16 --------------------------------------------------------------------
+
+
+class Updates(Hook):
+    """Every update's OptimizerStepEvent, as the hooks are told it."""
+
+    def __init__(self) -> None:
+        self.stepped: list[OptimizerStepEvent] = []
+
+    def on_optimizer_step(self, event: OptimizerStepEvent) -> None:
+        self.stepped.append(event)
+
+
+def head_dtypes(model: Transformer) -> set[torch.dtype]:
+    """The dtypes of the logits model.head makes from now on: a set that fills as it runs."""
+    seen: set[torch.dtype] = set()
+
+    def look(module: torch.nn.Module, inputs: tuple[torch.Tensor, ...], output: torch.Tensor):
+        seen.add(output.dtype)
+
+    model.head.register_forward_hook(look)
+    return seen
+
+
+def test_fp16_samples_and_trains_in_float16():
+    # Autocast's matmuls make float16 logits; the weights and the log-probs stay float32.
+    model = make()
+    dtypes = head_dtypes(model)
+    params = SamplingParams(temperature=1.0)
+    batch = generate(model, PROMPTS, 3, params, torch.Generator().manual_seed(0), precision="fp16")
+    assert dtypes == {torch.float16}
+    assert batch.sampler_logprobs.dtype == torch.float32
+    mask = batch.response_mask
+    with torch.no_grad():  # the trainer's fp16 log-probs: the sampler's, to rounding
+        trainer = answer_logprobs(model, batch, 1.0, precision="fp16")
+    assert trainer.dtype == torch.float32
+    # 30 seeds: 2.4e-4 at worst, where fp32's trainer and sampler differ by 4.8e-7.
+    torch.testing.assert_close(trainer[mask], batch.sampler_logprobs[mask], atol=1e-2, rtol=0)
+    dtypes.clear()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    rl_update(model, optimizer, batch, ADVANTAGES, mask, algo(), temperature=1.0, precision="fp16")
+    assert dtypes == {torch.float16}
+    assert {weight.dtype for weight in model.parameters()} == {torch.float32}
+
+
+def test_fp16_log_probs_and_updates_match_fp32_to_rounding():
+    # 30 seeds, the worst differences: log-probs 2.3e-4, losses 1.7e-5, grad norms 0.53%.
+    batch = roll(make(), 1.0)
+    mask = batch.response_mask
+    with torch.no_grad():
+        fp32 = answer_logprobs(make(), batch, 1.0)
+        fp16 = answer_logprobs(make(), batch, 1.0, precision="fp16")
+    assert not torch.equal(fp16, fp32)  # float16 rounds more
+    torch.testing.assert_close(fp16[mask], fp32[mask], atol=1e-2, rtol=0)
+
+    def updates(precision: Precision) -> list[UpdateMetrics]:
+        model = make()
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        trains = (model, optimizer, batch, ADVANTAGES, mask, algo())
+        return rl_update(*trains, temperature=1.0, epochs=3, precision=precision)
+
+    for full, half in zip(updates("fp32"), updates("fp16"), strict=True):
+        assert half.loss == pytest.approx(full.loss, abs=1e-3)
+        assert half.grad_norm == pytest.approx(full.grad_norm, rel=0.05)  # the true gradient's
+
+
+def test_an_overflowing_update_is_skipped_and_the_hooks_are_told():
+    batch = roll(make(), 1.0)
+    # A scale of infinity overflows every gradient; 2**16 (the default) overflows none here.
+    for init_scale, skipped in ((2.0**16, False), (math.inf, True)):
+        model, updates = make(), Updates()
+        before = copy.deepcopy(model.state_dict())
+        (update,) = rl_update(
+            model,
+            torch.optim.SGD(model.parameters(), lr=0.1),
+            batch,
+            ADVANTAGES,
+            batch.response_mask,
+            algo(),
+            temperature=1.0,
+            hooks=[updates],
+            precision="fp16",
+            scaler=torch.amp.GradScaler("cpu", init_scale=init_scale),
+        )
+        (event,) = updates.stepped
+        assert (event.loss_scale, event.skipped) == (init_scale, skipped)
+        assert math.isfinite(update.grad_norm) != skipped
+        after = model.state_dict()
+        assert all(torch.equal(before[name], after[name]) for name in after) == skipped
+    fp32 = Updates()
+    model = make()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    mask = batch.response_mask
+    rl_update(model, optimizer, batch, ADVANTAGES, mask, algo(), temperature=1.0, hooks=[fp32])
+    assert (fp32.stepped[0].loss_scale, fp32.stepped[0].skipped) == (None, False)  # no scaler

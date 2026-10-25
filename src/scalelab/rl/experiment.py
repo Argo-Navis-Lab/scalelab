@@ -170,6 +170,7 @@ def run_rl_experiment(
     on_anomaly: Callable[[AnomalyEvent], None] = ignore,
     on_step: Callable[[RLStepMetrics], None] | None = None,
     padding_cut: bool = False,
+    precision: Precision = "fp32",
 ) -> list[RLStepMetrics]:
     """RL on the config's task, starting from `start`: the model rl.from_run ended with,
     which is also the KL penalty's reference (a copy is kept; `start` itself is trained).
@@ -183,7 +184,8 @@ def run_rl_experiment(
     collector measures every step and records it there (telemetry), and the online
     detectors judge what they measured: each event goes to `on_anomaly`. `on_step`, if
     given, is called with each step's metrics before that step is graded. `padding_cut`:
-    runtime.padding_cut (m3s16).
+    runtime.padding_cut (m3s16). `precision`: runtime.precision (m3s22), for the training
+    only: the gradings stay fp32, so every run is graded the same way.
     """
     if config.algo is None or config.rl is None:
         raise ValueError(f"{config.name} is not an RL experiment: it has no algo and rl sections")
@@ -239,4 +241,5 @@ def run_rl_experiment(
         hooks=hooks,
         monitor=monitor,
         padding_cut=padding_cut,
+        precision=precision,  # m3s22
     )

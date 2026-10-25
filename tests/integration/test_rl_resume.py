@@ -9,7 +9,7 @@ import torch
 import yaml
 
 from scalelab.core.checkpoint import CheckpointPolicy, latest_checkpoint, load_checkpoint
-from scalelab.core.config import AlgoConfig, ModelConfig, RLConfig
+from scalelab.core.config import AlgoConfig, ModelConfig, Precision, RLConfig
 from scalelab.core.determinism import seed_everything
 from scalelab.models.transformer import Transformer
 from scalelab.rl.loop import RLStepMetrics, rl_train
@@ -31,10 +31,12 @@ class Hurry(ArithmeticTask):
         return Reward(value=0.0, format=0.0, parsed=None, flags=("no_answer",))
 
 
-def session(home: Path, folder: str, stop_after: int | None = None) -> list[RLStepMetrics]:
+def session(
+    home: Path, folder: str, stop_after: int | None = None, precision: Precision = "fp32"
+) -> list[RLStepMetrics]:
     """One session of a run, as a fresh process would start it: everything built again from
     the seed (the model as the warm start would hand it over), then the latest checkpoint (if
-    any) picks up where the last session stopped."""
+    any) picks up where the last session stopped. In `precision` (m3s22)."""
     seeds = seed_everything(0, deterministic=True)
     model = Transformer(TINY)
     return rl_train(
@@ -50,6 +52,7 @@ def session(home: Path, folder: str, stop_after: int | None = None) -> list[RLSt
         policy=CheckpointPolicy(every_steps=3),
         reference=copy.deepcopy(model),  # the starting weights, as in a real run
         stop_after=stop_after,
+        precision=precision,
     )
 
 
@@ -80,3 +83,16 @@ def test_interrupted_twice_is_still_bit_identical(tmp_path: Path):
 def test_a_finished_rl_run_has_nothing_left_to_do(tmp_path: Path):
     assert len(session(tmp_path, "a")) > 5
     assert session(tmp_path, "a") == []
+
+
+def test_an_fp16_run_resumes_with_its_loss_scale(tmp_path: Path):  # m3s22
+    uninterrupted = session(tmp_path, "a", precision="fp16")
+    before = session(tmp_path, "b", stop_after=3, precision="fp16")
+    after = session(tmp_path, "b", precision="fp16")
+    assert before + after == uninterrupted
+    assert uninterrupted != session(tmp_path, "c")  # fp32 rounds otherwise
+    latest = latest_checkpoint(tmp_path / "b")
+    assert latest is not None
+    scaler = load_checkpoint(latest, home=tmp_path)[1]["scaler"]
+    # No update overflowed, so the scale is still 2**16, counting every step towards doubling.
+    assert (scaler["scale"], scaler["_growth_tracker"]) == (2.0**16, len(uninterrupted))

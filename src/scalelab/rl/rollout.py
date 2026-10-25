@@ -8,8 +8,9 @@ from typing import Literal
 import torch
 from torch import Tensor
 
-from scalelab.core.config import SamplingParams
+from scalelab.core.config import Precision, SamplingParams
 from scalelab.costmodel.rlstep import decode_chunks
+from scalelab.models.precision import autocast
 from scalelab.models.transformer import Transformer
 from scalelab.rl.sampling import sample
 from scalelab.tasks.tokenizer import EOS, PAD
@@ -83,6 +84,7 @@ def generate(
     generator: torch.Generator,
     policy_version: int = 0,
     batch_size: int = 512,
+    precision: Precision = "fp32",
 ) -> RolloutBatch:
     """Sample `n_per_prompt` answers to every prompt. Each answer ends at its first <eos>, or
     where prompt and answer fill the model's context.
@@ -90,6 +92,9 @@ def generate(
     Rows whose prompts have the same length are decoded together, at most `batch_size` at a
     time, so no padding is needed. All the randomness comes from `generator` (on the model's
     device): the same prompts, settings and generator state give the same rollouts.
+
+    With `precision` "fp16" (m3s22), each batch (its prompts and every decode step) runs in
+    one autocast float16 region, so each weight is cast once a batch.
     """
     # groups[r]: the prompt that row r answers. n rows per prompt, in the prompts' order.
     groups = [index for index in range(len(prompts)) for _ in range(n_per_prompt)]
@@ -97,7 +102,8 @@ def generate(
     logprobs: list[list[float]] = [[] for _ in groups]
     for chunk in decode_chunks([len(prompts[index]) for index in groups], batch_size):
         chunk_prompts = [prompts[groups[row]] for row in chunk]
-        written = _sample_batch(model, chunk_prompts, params, generator)
+        with autocast(precision, model.embed.weight.device):  # m3s22: one region a batch
+            written = _sample_batch(model, chunk_prompts, params, generator)
         for row, (answer, values) in zip(chunk, written, strict=True):
             answers[row], logprobs[row] = answer, values  # back to the row's own place
 

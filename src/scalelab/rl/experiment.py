@@ -29,6 +29,7 @@ from scalelab.tasks.countdown import CountdownProblem, CountdownTask
 from scalelab.tasks.evalsets import EVAL_SETS, eval_set_name, read_eval_set
 from scalelab.telemetry.anomalies import AnomalyEvent, AnomalyMonitor, ignore
 from scalelab.telemetry.collectors import Cadence, make_collectors
+from scalelab.telemetry.detectors import ThroughputDetector
 from scalelab.telemetry.hooks import Hook
 from scalelab.telemetry.sink import MetricsSink
 
@@ -171,6 +172,7 @@ def run_rl_experiment(
     on_step: Callable[[RLStepMetrics], None] | None = None,
     padding_cut: bool = False,
     precision: Precision = "fp32",
+    throughput: ThroughputDetector | None = None,
 ) -> list[RLStepMetrics]:
     """RL on the config's task, starting from `start`: the model rl.from_run ended with,
     which is also the KL penalty's reference (a copy is kept; `start` itself is trained).
@@ -185,7 +187,8 @@ def run_rl_experiment(
     detectors judge what they measured: each event goes to `on_anomaly`. `on_step`, if
     given, is called with each step's metrics before that step is graded. `padding_cut`:
     runtime.padding_cut (m3s16). `precision`: runtime.precision (m3s22), for the training
-    only: the gradings stay fp32, so every run is graded the same way.
+    only: the gradings stay fp32, so every run is graded the same way. `throughput` (m3s25)
+    joins the online detectors, with a sink.
     """
     if config.algo is None or config.rl is None:
         raise ValueError(f"{config.name} is not an RL experiment: it has no algo and rl sections")
@@ -205,7 +208,7 @@ def run_rl_experiment(
     if sink is not None:
         cadence = Cadence()  # m2s35: the detectors' events make the detailed collectors measure
         hooks = [*make_collectors(sink, algo, cadence), sink]  # the sink last: it writes them
-        monitor = AnomalyMonitor(sink, cadence, on_anomaly)
+        monitor = AnomalyMonitor(sink, cadence, on_anomaly, throughput)
 
     def grade(metrics: RLStepMetrics | None) -> None:
         if report is None:

@@ -18,12 +18,13 @@ from scalelab.core.checkpoint import latest_checkpoint, load_checkpoint
 from scalelab.core.config import RuntimeConfig, load_config
 from scalelab.core.envcapture import EnvInfo
 from scalelab.core.registry import Registry
-from scalelab.costmodel.calibrate import Calibration, save_calibration
+from scalelab.costmodel.calibrate import Calibration, Errors, save_calibration
 from scalelab.costmodel.roofline import Efficiency, Group
 from scalelab.costmodel.specs import CPU
 from scalelab.costmodel.validate import PARTS, Validation, check_step
 from scalelab.rl.costing import measured_step, predict_rl_run, predict_run_step, predict_step
 from scalelab.rl.gradings import load_gradings
+from scalelab.telemetry.detectors import REGRESSION_STEPS, regression_limit
 from scalelab.telemetry.sink import metrics_folder, read_metrics
 
 HELLO = Path(__file__).resolve().parents[2] / "configs" / "experiments" / "hello.yaml"
@@ -534,3 +535,29 @@ def test_cost_measure_times_fp16_beside_fp32(home: Path, capsys: pytest.CaptureF
     assert "# Measured: fp16, hello on cpu\n" in output
     (prediction,) = (home / "reports").glob("fp16-*-cpu.json")
     assert prediction.with_name(f"{prediction.stem}-measured.json").is_file()
+
+
+# --- added in m3s25: the throughput detector ------------------------------------------------
+
+
+def test_an_rl_run_is_watched_against_its_predicted_step_once_validated(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    warm_start = warm_started(home)
+    rl = [*SMALL_RL, f"rl.from_run={warm_start}"]
+    assert main(["run", str(RL), *rl]) == 0
+    out = capsys.readouterr().out
+    assert "throughput:    not watched (run cost validate --hardware cpu first)\n" in out
+    # like the Mac's healthy runs (m3s10)
+    step = Errors(samples=14, mape=0.3, bias=-0.3, worst=-0.86, median=-0.28, spread=0.05)
+    validation = Validation(hardware="cpu", errors={"step": step})
+    (home / "bench" / "cpu").mkdir(parents=True)
+    (home / "bench" / "cpu" / "validation.json").write_text(validation.model_dump_json())
+    assert main(["run", str(RL), *rl, "seed=1"]) == 0
+    predicted = predict_run_step(load_config(RL, rl), RuntimeConfig(), CPU).seconds
+    limit = regression_limit(predicted, -0.28, 0.05)
+    line = (
+        f"throughput:    {predicted:.3f} s a step predicted; {REGRESSION_STEPS} in a row above "
+        f"{limit:.3f} s are a regression (step: median -28.0%, spread 5.0%)\n"
+    )
+    assert line in capsys.readouterr().out

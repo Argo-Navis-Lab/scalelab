@@ -10,6 +10,7 @@ from scalelab.costmodel.rlstep import StepPrediction
 PARTS = ("generate", "logprobs", "train", "step")  # the phases the model times, then the step
 TARGET_MAPE = 0.15  # M3's exit: whole steps within 15% on average
 VALIDATION_FILE = "validation.json"  # m3s15: cost validate's errors, beside calibration.json
+BAND_MIN_RUNS = 5  # m3s25: fewer runs say too little about how widely the model's errors spread
 
 
 class Validation(StrictModel):
@@ -52,6 +53,19 @@ def check_step(
         predicted=predicted,
         measured={part: measured[part] for part in predicted},
     )
+
+
+def band(validation: Validation, label: str) -> tuple[str, float, float] | None:
+    """Which step errors a run's steps are judged by, with their median and spread (m3s25):
+    those of the runs that ran as it does (`label`, a runtime_label) if cost validate saw several
+    runtimes, else every run's. They need BAND_MIN_RUNS runs, and a file saved since m3s25."""
+    for part in (f"step, {label}", "step"):
+        errors = validation.errors.get(part)
+        if errors is None or errors.samples < BAND_MIN_RUNS:
+            continue
+        if errors.median is not None and errors.spread is not None:
+            return part, errors.median, errors.spread
+    return None
 
 
 def summarize(checks: Sequence[StepCheck]) -> dict[str, Errors]:

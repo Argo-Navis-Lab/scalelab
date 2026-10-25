@@ -2,7 +2,8 @@
 wrong. The spike detector judges each value against the metric's recent values, measured with
 the median and the median absolute deviation, which a few spikes barely move. The divergence
 detector looks for NaNs and for a metric growing steadily; the collapse detector, for a policy
-that has stopped exploring or learning."""
+that has stopped exploring or learning; the throughput detector, for steps slower than the cost
+model allows."""
 
 import math
 import statistics
@@ -189,3 +190,62 @@ class CollapseDetector:
             if metric == FLAT_GROUPS and mean > self.flat_groups_limit:
                 collapses.append(Collapse(step, metric, mean, self.flat_groups_limit))
         return collapses
+
+
+# m3s25: what the throughput detector watches, and how.
+STEP_TIME = "system/step_s"
+REGRESSION_SIGMAS = 3.0  # a slow step lies 3 standard deviations of the model's error beyond it
+REGRESSION_STEPS = 20  # this many slow steps in a row are a regression: one slow step is noise
+
+
+def regression_limit(
+    predicted: float, median: float, spread: float, sigmas: float = REGRESSION_SIGMAS
+) -> float:
+    """The slowest step a prediction of `predicted` seconds allows. On this device the model's
+    errors (predicted / measured - 1) center on `median`, with a standard deviation of `spread`,
+    so a step whose error lies `sigmas` deviations below the median ran too slow: measured above
+    predicted / (1 + median - sigmas spread). Infinite when that reaches -100%: none is."""
+    lowest = 1 + median - sigmas * spread
+    return predicted / lowest if lowest > 0 else math.inf
+
+
+@dataclass(frozen=True)
+class Regression:
+    """Steps slower than the cost model allows, `steps` of them in a row so far."""
+
+    step: int
+    metric: str
+    mean: float  # the measured seconds a step, over the slow steps in a row
+    limit: float  # the slowest step allowed
+    predicted: float  # the cost model's seconds a step
+    steps: int
+
+
+class ThroughputDetector:
+    """Watches each step's seconds against the cost model's prediction for the run. A step above
+    `limit` (regression_limit) is slow; `steps` slow ones in a row are a regression, which lasts
+    until a step isn't slow. A missing or non-finite step time is skipped. It keeps only the
+    slow steps' count and their sum."""
+
+    def __init__(self, predicted: float, limit: float, steps: int = REGRESSION_STEPS) -> None:
+        self.predicted = predicted
+        self.limit = limit
+        self.steps = steps
+        self.slow = 0  # the slow steps in a row, up to the last step
+        self.slow_seconds = 0.0  # what they measured, summed
+
+    def check(self, step: int, values: Mapping[str, float]) -> list[Regression]:
+        """A regression, if one step's time makes `steps` slow ones in a row; steps come in
+        order."""
+        value = values.get(STEP_TIME)
+        if value is None or not math.isfinite(value):
+            return []
+        if value <= self.limit:
+            self.slow, self.slow_seconds = 0, 0.0
+            return []
+        self.slow += 1
+        self.slow_seconds += value
+        if self.slow < self.steps:
+            return []
+        mean = self.slow_seconds / self.slow
+        return [Regression(step, STEP_TIME, mean, self.limit, self.predicted, self.slow)]

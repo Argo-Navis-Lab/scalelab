@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import json
+import math
 import re
 import shutil
 import signal
@@ -68,6 +69,7 @@ from scalelab.costmodel.validate import (
     VALIDATION_FILE,
     StepCheck,
     Validation,
+    band,
     check_step,
     summarize,
 )
@@ -94,6 +96,7 @@ from scalelab.rl.measure import measure_change
 from scalelab.rl.overhead import OVERHEAD_BUDGET, measure_overhead
 from scalelab.rl.warmstart_loop import StepMetrics
 from scalelab.telemetry.anomalies import AnomalyEvent, RunHalted
+from scalelab.telemetry.detectors import REGRESSION_STEPS, ThroughputDetector, regression_limit
 from scalelab.telemetry.sink import MetricsSink, metrics_folder, read_metrics
 
 EXIT_USAGE = 2  # the command line asked for something impossible
@@ -320,6 +323,9 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
         print(f"gradings:      {gradings_folder(home, run_id)}")  # m2s38
     telemetry = metrics_folder(home, run_id) if runtime.telemetry else "off"  # m2s36
     print(f"metrics:       {telemetry}")  # m3s11: a warm start's step times go there too
+    throughput = None  # m3s25: an RL run's steps against the cost model's, with telemetry on
+    if config.rl is not None and runtime.telemetry:
+        throughput = watch_throughput(config, runtime)
 
     # Speed is measured between gradings, from the time and the token (or FLOP) count at the
     # last one. A resumed run's count isn't known here, so its first grading shows none.
@@ -436,6 +442,7 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
                     record_anomaly,
                     padding_cut=runtime.padding_cut,  # m3s16
                     precision=runtime.precision,  # m3s22
+                    throughput=throughput,  # m3s25
                 )
         except RunHalted as halted:
             registry.finish_run(run_id, "failed")
@@ -739,6 +746,49 @@ def ran_on(label: str, hardware_name: str) -> bool:
     return re.match(r"\d+x ", label) is None and hardware_name.split("-")[0] in label.lower()
 
 
+def this_hardware() -> str | None:
+    """The hardware profile of the device runs use here (m3s25): cpu without a GPU, else the
+    profile whose name its GPU's name holds as a word ("a100-40g": "NVIDIA A100-SXM4-40GB");
+    None if none does."""
+    if not torch.cuda.is_available():
+        return "cpu"
+    gpu = torch.cuda.get_device_name().lower()
+    return next((name for name in HARDWARE if re.search(rf"\b{name.split('-')[0]}\b", gpu)), None)
+
+
+def watch_throughput(config: ExperimentConfig, runtime: RuntimeConfig) -> ThroughputDetector | None:
+    """The throughput detector for an RL run here (m3s25): the cost model's step as the run
+    computes it, and the slowest step allowed by the errors cost validate saved for this device.
+    None when there is nothing to judge by. Prints the prediction and the limit, or why not."""
+    hardware_name = this_hardware()
+    if hardware_name is None:
+        print(f"throughput:    not watched ({torch.cuda.get_device_name()} has no profile)")
+        return None
+    path = bench_folder(scalelab_home(), hardware_name) / VALIDATION_FILE
+    found = None
+    if path.is_file():
+        found = band(Validation.model_validate_json(path.read_text()), runtime_label(runtime))
+    if found is None:
+        print(f"throughput:    not watched (run cost validate --hardware {hardware_name} first)")
+        return None
+    part, median, spread = found
+    efficiencies = efficiencies_for(hardware_name)  # what cost validate predicted with
+    if runtime.precision == "fp16" and missing_half(efficiencies):
+        print("throughput:    not watched (the calibration has no fp16 fit)")
+        return None
+    hardware = hardware_spec(hardware_name)
+    predicted = predict_run_step(config, runtime, hardware, efficiencies).seconds
+    limit = regression_limit(predicted, median, spread)
+    if math.isinf(limit):
+        print(f"throughput:    not watched ({part}: spread {spread:.1%}, too wide)")
+        return None
+    print(
+        f"throughput:    {predicted:.3f} s a step predicted; {REGRESSION_STEPS} in a row above "
+        f"{limit:.3f} s are a regression ({part}: median {median:+.1%}, spread {spread:.1%})"
+    )
+    return ThroughputDetector(predicted, limit)
+
+
 def cost_validate(hardware_name: str) -> int:
     """`scalelab cost validate`: the cost model's step against the steps runs on this hardware
     measured (telemetry's laps: RL runs' since m2s29, warm starts' since m3s11), phase by phase.
@@ -800,10 +850,12 @@ def cost_validate(hardware_name: str) -> int:
         for label in sorted(set(labels.values())):
             same = [check for check in checks if labels[check.run_id] == label]
             summary[f"step, {label}"] = summarize(same)["step"]
-    print(f"{'part':<15}{'runs':>6}{'MAPE':>8}{'bias':>8}{'worst':>8}")
+    columns = f"{'MAPE':>8}{'bias':>8}{'worst':>8}{'median':>8}{'spread':>8}"  # m3s25: the band
+    print(f"{'part':<15}{'runs':>6}{columns}")
     for part, errors in summary.items():
         mape, bias, worst = f"{errors.mape:.1%}", f"{errors.bias:+.1%}", f"{errors.worst:+.1%}"
-        print(f"{part:<15}{errors.samples:6d}{mape:>8}{bias:>8}{worst:>8}")
+        robust = f"{errors.median:>+8.1%}{errors.spread:>8.1%}"  # just computed: never None
+        print(f"{part:<15}{errors.samples:6d}{mape:>8}{bias:>8}{worst:>8}{robust}")
     step = summary["step"].mape
     verdict = "within" if step <= TARGET_MAPE else "above"
     print(

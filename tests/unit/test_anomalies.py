@@ -11,7 +11,15 @@ import pytest
 from scalelab.core.checkpoint import load_checkpoint, save_checkpoint
 from scalelab.telemetry.anomalies import AnomalyEvent, AnomalyMonitor, severity
 from scalelab.telemetry.collectors import Cadence
-from scalelab.telemetry.detectors import Collapse, Divergence, Spike
+from scalelab.telemetry.detectors import (
+    REGRESSION_STEPS,
+    STEP_TIME,
+    Collapse,
+    Divergence,
+    Regression,
+    Spike,
+    ThroughputDetector,
+)
 from scalelab.telemetry.sink import MetricsSink
 
 
@@ -103,3 +111,42 @@ def test_the_detectors_carry_on_through_a_checkpoint(tmp_path: Path):
     assert resumed == [e for e in events if e.step > 150]  # the collapse is not found anew
     assert resumed  # spikes and a divergence
     assert after.state() == whole.state()
+
+
+# m3s25: the throughput detector joins them.
+
+
+def watched(home: Path) -> AnomalyMonitor:
+    """A monitor that also judges each step's seconds: 1.0 predicted, slow above 1.2."""
+    return AnomalyMonitor(
+        MetricsSink(home, "run"), Cadence(), throughput=ThroughputDetector(1.0, 1.2)
+    )
+
+
+def test_a_throughput_regression_is_one_warn_event_where_it_starts(tmp_path: Path):
+    assert severity(Regression(5, STEP_TIME, 1.5, 1.2, 1.0, 20)) == "WARN"
+    monitor = watched(tmp_path)
+    [event] = run(monitor, [{STEP_TIME: 1.0}] * 5 + [{STEP_TIME: 1.5}] * 30)
+    assert (event.step, event.detector, event.metric) == (25, "throughput", STEP_TIME)
+    assert event.severity == "WARN"
+    assert event.window_metrics == {"mean": 1.5, "limit": 1.2, "predicted": 1.0, "steps": 20}
+    assert monitor.cadence.until == 25 + monitor.cadence.after_alert
+
+
+def test_the_slow_steps_carry_on_through_a_checkpoint(tmp_path: Path):
+    steps = [{STEP_TIME: 1.5}] * 30
+    whole = run(watched(tmp_path / "whole"), steps)
+    assert [event.step for event in whole] == [REGRESSION_STEPS]
+
+    before = watched(tmp_path / "before")
+    run(before, steps[:10])
+    manifest = save_checkpoint(tmp_path / "ckpt", 10, {"anomalies": before.state()}, tmp_path)
+    after = watched(tmp_path / "after")
+    after.load_state(load_checkpoint(manifest, tmp_path)[1]["anomalies"])
+    assert run(after, steps[10:], first=11) == whole  # the 10 slow steps before still count
+
+    older = before.state()
+    del older["throughput"]  # a checkpoint saved before m3s25
+    resumed = watched(tmp_path / "older")
+    resumed.load_state(older)
+    assert resumed.state()["throughput"] == [0, 0.0]

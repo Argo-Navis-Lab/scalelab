@@ -2,9 +2,18 @@
 
 import pytest
 
+from scalelab.costmodel.calibrate import Errors, errors_between
 from scalelab.costmodel.rlstep import Phase, PhaseTime, StepPrediction
-from scalelab.costmodel.validate import PARTS, check_step, summarize
+from scalelab.costmodel.validate import (
+    BAND_MIN_RUNS,
+    PARTS,
+    Validation,
+    band,
+    check_step,
+    summarize,
+)
 from scalelab.rl.costing import measured_step
+from scalelab.telemetry.detectors import MAD_TO_STD
 from scalelab.telemetry.sink import MetricRow
 
 
@@ -96,3 +105,35 @@ def test_each_part_is_summed_up_over_the_runs_that_time_it() -> None:
     assert samples == {"generate": 1, "logprobs": 1, "train": 2, "step": 2}
     assert summary["step"].mape == pytest.approx(0.175)  # step: +10% and -25%
     assert list(summarize([warm])) == ["train", "step"]
+
+
+# m3s25: the errors' median and spread, for the throughput detector.
+
+
+def test_errors_keep_a_median_and_spread_that_a_wild_run_barely_moves() -> None:
+    errors = errors_between([1.1, 0.9, 1.0], [1.0, 1.0, 1.0])  # errors +10%, -10%, 0
+    assert errors.median == pytest.approx(0.0, abs=1e-12)
+    assert errors.spread == pytest.approx(MAD_TO_STD * 0.1)
+    wild = errors_between([1.1, 0.9, 1.0, 0.1], [1.0] * 4)  # and a run at -90%
+    assert wild.median == pytest.approx(-0.05)
+    assert wild.spread == pytest.approx(MAD_TO_STD * 0.1)  # the MAD of 0.15, 0.05, 0.05, 0.85
+    old = '{"samples": 28, "mape": 0.04, "bias": 0.006, "worst": -0.101}'  # saved before m3s25
+    assert Errors.model_validate_json(old).spread is None
+
+
+def test_the_band_is_the_runtimes_own_step_errors_given_enough_runs() -> None:
+    def errors(runs: int, median: float | None, spread: float | None) -> Errors:
+        return Errors(samples=runs, mape=0.1, bias=-0.1, worst=-0.2, median=median, spread=spread)
+
+    validation = Validation(
+        hardware="t4",
+        errors={
+            "step": errors(20, 0.01, 0.05),
+            "step, fp16": errors(BAND_MIN_RUNS, -0.13, 0.04),
+            "step, fp32 cut": errors(BAND_MIN_RUNS - 1, 0.0, 0.01),
+        },
+    )
+    assert band(validation, "fp16") == ("step, fp16", -0.13, 0.04)
+    assert band(validation, "fp32 cut") == ("step", 0.01, 0.05)  # too few runs of its own
+    assert band(validation, "fp32") == ("step", 0.01, 0.05)
+    assert band(Validation(hardware="t4", errors={"step": errors(20, None, None)}), "fp32") is None

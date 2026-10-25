@@ -17,16 +17,20 @@ from scalelab.telemetry.detectors import (
     FLAT_GROUPS,
     FLAT_GROUPS_LIMIT,
     MAD_TO_STD,
+    REGRESSION_STEPS,
     SPIKE_MIN_HISTORY,
     SPIKE_THRESHOLD,
     SPIKE_WINDOW,
+    STEP_TIME,
     Collapse,
     CollapseDetector,
     Divergence,
     DivergenceDetector,
     Spike,
     SpikeDetector,
+    ThroughputDetector,
     median_and_mad,
+    regression_limit,
     robust_z,
 )
 
@@ -233,3 +237,61 @@ def test_each_metric_has_its_own_window_and_unusable_values_are_not_kept():
     [found] = detector.check(COLLAPSE_WINDOW + 1, {FLAT_GROUPS: 1.0, "policy/kl_ref": 0.0})
     assert (found.step, found.metric) == (COLLAPSE_WINDOW + 1, FLAT_GROUPS)
     assert [len(window) for window in detector.windows.values()] == [0, COLLAPSE_WINDOW]
+
+
+# m3s25: the throughput detector.
+
+
+def test_the_regression_limit_by_hand():
+    assert regression_limit(2.0, 0.0, 0.05) == pytest.approx(2.0 / 0.85)
+    assert regression_limit(2.0, -0.3, 0.05) == pytest.approx(2.0 / 0.55)  # a model that runs fast
+    assert regression_limit(2.0, 0.006, 0.05, sigmas=1.0) == pytest.approx(2.0 / 0.956)
+    assert regression_limit(2.0, -0.3, 0.25) == math.inf  # 1 - 0.3 - 0.75: past -100%
+
+
+def test_slow_steps_in_a_row_are_a_regression_until_a_step_is_not():
+    detector = ThroughputDetector(predicted=1.0, limit=1.2)
+    for step in range(1, REGRESSION_STEPS):
+        assert detector.check(step, {STEP_TIME: 1.3}) == []
+    [found] = detector.check(REGRESSION_STEPS, {STEP_TIME: 1.5})
+    assert (found.step, found.metric, found.limit, found.predicted) == (20, STEP_TIME, 1.2, 1.0)
+    assert (found.steps, found.mean) == (20, pytest.approx((19 * 1.3 + 1.5) / 20))
+    [still] = detector.check(21, {STEP_TIME: 1.3})
+    assert still.steps == 21
+    assert detector.check(22, {STEP_TIME: 1.2}) == []  # at the limit is not slow
+    assert (detector.slow, detector.slow_seconds) == (0, 0.0)
+    for step in range(23, 23 + REGRESSION_STEPS - 1):
+        assert detector.check(step, {STEP_TIME: 1.3}) == []  # counting from 0 again
+
+
+def test_a_missing_or_non_finite_step_time_is_skipped():
+    detector = ThroughputDetector(predicted=1.0, limit=1.2, steps=3)
+    assert detector.check(1, {STEP_TIME: 2.0}) == []
+    assert detector.check(2, {"optim/loss": 0.1}) == []
+    assert detector.check(3, {STEP_TIME: math.nan}) == []
+    assert detector.check(4, {STEP_TIME: math.inf}) == []
+    assert detector.check(5, {STEP_TIME: 2.0}) == []
+    [found] = detector.check(6, {STEP_TIME: 2.0})
+    assert (found.steps, found.mean) == (3, 2.0)
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_steps_scattered_like_the_models_errors_are_no_regression(seed: int):
+    rng = random.Random(seed)
+    median, spread = 0.006, 0.05  # about the T4's whole steps (m3s12)
+    detector = ThroughputDetector(2.0, regression_limit(2.0, median, spread))
+    for step in range(1, 1001):
+        assert detector.check(step, {STEP_TIME: 2.0 / (1 + rng.gauss(median, spread))}) == []
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_a_lasting_slowdown_is_found_once_it_has_lasted_long_enough(seed: int):
+    rng = random.Random(seed)
+    median, spread = 0.006, 0.05
+    detector = ThroughputDetector(2.0, regression_limit(2.0, median, spread))
+    found: list[int] = []
+    for step in range(1, 201):
+        slower = 1.5 if step > 100 else 1.0  # from step 101, each step takes 1.5 times as long
+        seconds = slower * 2.0 / (1 + rng.gauss(median, spread))
+        found += [regression.step for regression in detector.check(step, {STEP_TIME: seconds})]
+    assert found == list(range(100 + REGRESSION_STEPS, 201))

@@ -17,6 +17,7 @@ from scalelab.core.storage import atomic_write_text
 from scalelab.costmodel.ops import Op
 from scalelab.costmodel.roofline import Efficiency, Group, group, time_ops
 from scalelab.costmodel.specs import HardwareSpec
+from scalelab.telemetry.detectors import MAD_TO_STD, median_and_mad
 
 GROUPS: tuple[Group, ...] = get_args(Group)
 START = Efficiency(compute=0.5, memory=0.5, launch_s=1e-6)  # where the fit begins
@@ -42,15 +43,22 @@ class Errors(StrictModel):
     mape: float  # the mean size of the error
     bias: float  # the mean error: above 0, the predictions run slow
     worst: float  # the error of the largest size
+    # m3s25: their median, and a standard deviation estimated from their MAD: a few wild runs
+    # barely move either. The throughput detector's band; None in files saved before m3s25
+    median: float | None = None
+    spread: float | None = None
 
 
 def errors_between(predicted: Sequence[float], measured: Sequence[float]) -> Errors:
     gaps = [p / m - 1 for p, m in zip(predicted, measured, strict=True)]
+    median, mad = median_and_mad(gaps)
     return Errors(
         samples=len(gaps),
         mape=statistics.fmean(abs(gap) for gap in gaps),
         bias=statistics.fmean(gaps),
         worst=max(gaps, key=abs),
+        median=median,
+        spread=MAD_TO_STD * mad,
     )
 
 

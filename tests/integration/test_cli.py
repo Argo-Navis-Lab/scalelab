@@ -13,6 +13,7 @@ import torch
 
 from scalelab.analysis.reports import gains
 from scalelab.cli import main
+from scalelab.core.checkpoint import latest_checkpoint, load_checkpoint
 from scalelab.core.config import load_config
 from scalelab.core.envcapture import EnvInfo
 from scalelab.core.registry import Registry
@@ -438,3 +439,20 @@ def test_cost_measure_runs_on_the_device_it_predicts(
     assert main(["cost", "measure", str(HELLO), *SMALL, "--hardware", other]) == 2
     expected = f"--hardware {other}, but this machine runs steps on its {device}"
     assert expected in capsys.readouterr().err
+
+
+# --- m3s21: fp16 -----------------------------------------------------------------------------
+
+
+def test_fp16_reaches_the_warm_start_and_rl_refuses_it_until_m3s22(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    assert main(["run", str(HELLO), "runtime.precision=fp16"]) == 0
+    assert "precision:     fp16" in capsys.readouterr().out
+    (run,) = Registry.sqlite(home / "registry.db").list_runs()
+    latest = latest_checkpoint(home / "checkpoints" / run.run_id)
+    assert latest is not None
+    assert load_checkpoint(latest, home)[1]["scaler"]["growth_interval"] == 2000  # it had one
+    missing = "rl.from_run=0123456789abcdef-s0-01234567"
+    assert main(["run", str(RL), *SMALL_RL, missing, "runtime.precision=fp16"]) == 2
+    assert "runtime.precision=fp16: RL runs in fp32 until m3s22" in capsys.readouterr().err

@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from scalelab.core.checkpoint import CheckpointPolicy, latest_checkpoint
-from scalelab.core.config import ArithmeticOps, ExperimentConfig, StrictModel
+from scalelab.core.config import ArithmeticOps, ExperimentConfig, Precision, StrictModel
 from scalelab.core.determinism import seed_everything
 from scalelab.models.transformer import Transformer
 from scalelab.rl.evaluation import (
@@ -113,6 +113,7 @@ def run_experiment(
     sink: MetricsSink | None = None,
     padding_cut: bool = False,
     stop_after: int | None = None,
+    precision: Precision = "fp32",
 ) -> list[StepMetrics]:
     """Warm-start the config's model on its task, resuming from the latest checkpoint in
     `checkpoint_dir` if there is one. Returns the metrics of every step this call ran.
@@ -123,6 +124,7 @@ def run_experiment(
     each grading goes to `report`. Grading changes nothing about training. Each step's laps
     go to `sink`, if there is one (m3s11). `padding_cut`: runtime.padding_cut (m3s16).
     `stop_after=k` saves after step k and stops, as an interruption would (m3s17).
+    `precision`: runtime.precision (m3s21).
     """
     seeds = seed_everything(seed, deterministic)  # PyTorch's generator now follows seeds.init
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -151,6 +153,7 @@ def run_experiment(
         sink=sink,
         padding_cut=padding_cut,
         stop_after=stop_after,
+        precision=precision,
     )
 
 

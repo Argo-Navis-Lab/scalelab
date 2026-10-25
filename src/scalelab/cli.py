@@ -258,6 +258,7 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
     print(f"run:           {run_id}")
     print(f"code:          {code}")
     print(f"deterministic: {'on' if deterministic else 'off'}")
+    print(f"precision:     {runtime.precision}")  # m3s21: the run_id doesn't show it
     print(f"home:          {home}")
 
     if live != at_home:
@@ -287,6 +288,8 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
         return 0
     start = None  # RL's starting model, checked before anything is recorded
     if config.rl is not None:
+        if runtime.precision != "fp32":  # m3s21: warm starts only, until m3s22
+            raise UsageError(f"runtime.precision={runtime.precision}: RL runs in fp32 until m3s22")
         start = load_warm_start(config.rl.from_run, config.model, registry, home)
         print(f"warm start:    {config.rl.from_run}")
         print(f"gradings:      {gradings_folder(home, run_id)}")  # m2s38
@@ -390,6 +393,7 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
                     report,
                     sink,
                     padding_cut=runtime.padding_cut,  # m3s16
+                    precision=runtime.precision,  # m3s21
                 )
             else:
                 metrics = run_rl_experiment(

@@ -184,6 +184,12 @@ class ExperimentConfig(StrictModel):
         return self
 
 
+# m3s18: the number format a model's matmuls and attention run in: float32, or float16 under
+# autocast (the weights stay float32, cast as they are used). bf16 joins when a study needs it.
+# m3s21: moved here from costmodel/specs.py, so RuntimeConfig can name it.
+Precision = Literal["fp32", "fp16"]
+
+
 class RuntimeConfig(StrictModel):
     """Everything about WHERE and HOW it runs. Never hashed."""
 
@@ -208,6 +214,13 @@ class RuntimeConfig(StrictModel):
     # FLOPs are still counted as the whole batch padded, so budgets buy the same steps. Off
     # by default: m3s15's reports favor it on the T4, not on the A100.
     padding_cut: bool = False
+
+    # m3s21: fp16 runs each forward pass under autocast float16 (the weights stay float32) and
+    # scales the loss with a GradScaler, as m3s18's op graph prices it. Not the same math: more
+    # rounding, and a step whose gradients overflow is skipped. Never hashed, like the cut: an
+    # fp16 run has its fp32 twin's run_id, so keep the two in different homes. Warm starts only
+    # for now (RL: m3s22).
+    precision: Precision = "fp32"
 
 
 # --- composing a config from several files --------------------------------------------

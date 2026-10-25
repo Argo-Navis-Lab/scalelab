@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import Field, PositiveFloat, model_validator
 
-from scalelab.core.config import ModelConfig, StrictModel
+from scalelab.core.config import ModelConfig, Precision, StrictModel
 from scalelab.tasks.tokenizer import VOCAB_SIZE
 
 
@@ -29,11 +29,6 @@ class ParamCounts(StrictModel):
     @property
     def total(self) -> int:
         return self.embedding + self.non_embedding + self.head
-
-
-# m3s18: the number format a workload's matmuls and attention run in: float32, or float16 under
-# autocast (the weights stay float32, cast as they are used). bf16 joins when a study needs it.
-Precision = Literal["fp32", "fp16"]
 
 
 class WorkloadSpec(StrictModel):

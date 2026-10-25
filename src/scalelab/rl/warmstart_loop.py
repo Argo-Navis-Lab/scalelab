@@ -16,9 +16,10 @@ from scalelab.core.checkpoint import (
     restore_rng,
     save_checkpoint,
 )
-from scalelab.core.config import RLConfig, StrictModel, WarmStartConfig
+from scalelab.core.config import Precision, RLConfig, StrictModel, WarmStartConfig
 from scalelab.costmodel.ops import count_flops
 from scalelab.costmodel.specs import ModelSpec, WorkloadSpec
+from scalelab.models.precision import autocast
 from scalelab.models.transformer import Transformer
 from scalelab.rl.warmstart import make_batch, make_pieces, sample_examples, warm_start_loss
 from scalelab.tasks.base import Task
@@ -74,6 +75,7 @@ def warm_start[P](
     on_step: Callable[[StepMetrics], None] | None = None,
     sink: MetricsSink | None = None,
     padding_cut: bool = False,
+    precision: Precision = "fp32",
 ) -> list[StepMetrics]:
     """Train `model` on worked solutions until config.tokens positions have been read,
     resuming from the latest checkpoint in `checkpoint_dir` if there is one.
@@ -86,18 +88,25 @@ def warm_start[P](
 
     With `padding_cut` (m3s16), each step runs in WARM_START_PIECES pieces, shortest rows
     first, each padded to its own longest: the same update (to rounding), less padding.
+
+    With `precision` "fp16" (m3s21), each forward pass and its loss run under autocast
+    float16 (the weights stay float32). A GradScaler multiplies the loss before backward, so
+    small gradients don't round to 0 in float16, and divides it out again before clipping. A
+    step whose gradients overflow is skipped (its grad_norm is inf or nan), the scale halved.
     """
     policy = policy or CheckpointPolicy()
     optimizer = make_optimizer(model, config)
     spec = ModelSpec.from_config(model.config)
     device = model.embed.weight.device
-
+    scaler = torch.amp.GradScaler(device.type, enabled=precision == "fp16")  # m3s21: fp32: off
     step, tokens, flops = 0, 0, 0
     latest = latest_checkpoint(checkpoint_dir)
     if latest is not None:
         step, state = load_checkpoint(latest, home)
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])
+        if state.get("scaler"):  # m3s21: fp32 checkpoints (and older ones) keep none
+            scaler.load_state_dict(state["scaler"])
         data_rng.bit_generator.state = state["data_rng"]
         restore_rng(state["rng"])
         tokens, flops = state["tokens"], state["flops"]
@@ -124,11 +133,15 @@ def warm_start[P](
         loss = torch.zeros((), device=device)
         for piece in pieces:  # m3s16: each piece's share of the batch's mean, by trained tokens
             share = piece.trained_tokens / batch.trained_tokens
-            piece_loss = warm_start_loss(model(piece.inputs.to(device)), piece.targets.to(device))
-            (piece_loss * share).backward()
+            with autocast(precision, device):  # m3s21: one region a forward pass (m3s18)
+                logits = model(piece.inputs.to(device))
+                piece_loss = warm_start_loss(logits, piece.targets.to(device))
+            scaler.scale(piece_loss * share).backward()
             loss = loss + piece_loss.detach() * share
+        scaler.unscale_(optimizer)  # m3s21: clip the true gradients, not the scaled ones
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-        optimizer.step()
+        scaler.step(optimizer)  # skips the update if a gradient is inf or nan
+        scaler.update()  # halves the scale after a skip, doubles it after 2,000 clean steps
         timer.lap("train")  # forward, backward, clipping, the update
         metrics.append(
             StepMetrics(
@@ -152,6 +165,7 @@ def warm_start[P](
             state = {
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
+                "scaler": scaler.state_dict(),  # m3s21: {} in fp32
                 "data_rng": data_rng.bit_generator.state,
                 "rng": capture_rng(),
                 "tokens": tokens,

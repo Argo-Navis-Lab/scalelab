@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import torch
 
 from scalelab.analysis.reports import gains
 from scalelab.cli import main
@@ -397,3 +398,43 @@ def test_cost_validate_checks_each_run_that_timed_its_steps(
     )
     assert validation.hardware == "cpu" and "step" in validation.errors  # m3s15: for cost compare
     assert f"saved:         {home / 'bench' / 'cpu' / 'validation.json'}\n" in out
+
+
+# --- added in m3s17: the padding cut, measured ----------------------------------------------
+
+
+def test_cost_measure_predicts_the_cut_then_times_it_and_records_no_run(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    warm_start = warm_started(home)
+    before = sorted(home.rglob("*"))
+    registry = (home / "registry.db").read_bytes()
+    timed = ["--hardware", "cpu", "--steps", "2", "--warmup", "1"]
+    code = main(["cost", "measure", str(RL), *SMALL_RL, f"rl.from_run={warm_start}", *timed])
+    output = capsys.readouterr().out
+    assert code == 0
+    (prediction,) = (home / "reports").glob("padding-cut-*-cpu.json")
+    stem = prediction.with_suffix("")
+    assert re.search(rf"predicted: +step [\d.]+ -> [\d.]+ s \([-+][\d.]+%\), {stem}\.md", output)
+    assert "steps:         1 to warm up, then 2 timed; without, then with the cut" in output
+    assert "# Measured: padding-cut, rl on cpu\n" in output
+    seconds = r"(\d+\.\d{4} \| ){2}"
+    assert re.search(rf"\| step \| {seconds}[-+]\d+\.\d% \| {seconds}[-+]\d+\.\d% \|", output)
+    assert "- verdict: unjudged: cpu has no validation (cost validate saves one)" in output
+    assert f"saved:         {stem}-measured.md and .json" in output
+    names = sorted(path.name for path in (home / "reports").iterdir())
+    assert names == [
+        f"{stem.name}{end}" for end in ("-measured.json", "-measured.md", ".json", ".md")
+    ]
+    assert [path for path in sorted(home.rglob("*")) if "reports" not in path.parts] == before
+    assert (home / "registry.db").read_bytes() == registry
+
+
+def test_cost_measure_runs_on_the_device_it_predicts(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    device = torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu"
+    other = "cpu" if torch.cuda.is_available() else "t4"
+    assert main(["cost", "measure", str(HELLO), *SMALL, "--hardware", other]) == 2
+    expected = f"--hardware {other}, but this machine runs steps on its {device}"
+    assert expected in capsys.readouterr().err

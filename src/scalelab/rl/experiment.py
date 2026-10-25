@@ -112,6 +112,7 @@ def run_experiment(
     report: Report | None = None,
     sink: MetricsSink | None = None,
     padding_cut: bool = False,
+    stop_after: int | None = None,
 ) -> list[StepMetrics]:
     """Warm-start the config's model on its task, resuming from the latest checkpoint in
     `checkpoint_dir` if there is one. Returns the metrics of every step this call ran.
@@ -121,6 +122,7 @@ def run_experiment(
     `report`, the model is graded every config.eval.every steps and after the last one, and
     each grading goes to `report`. Grading changes nothing about training. Each step's laps
     go to `sink`, if there is one (m3s11). `padding_cut`: runtime.padding_cut (m3s16).
+    `stop_after=k` saves after step k and stops, as an interruption would (m3s17).
     """
     seeds = seed_everything(seed, deterministic)  # PyTorch's generator now follows seeds.init
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -148,6 +150,7 @@ def run_experiment(
         on_step=grade,
         sink=sink,
         padding_cut=padding_cut,
+        stop_after=stop_after,
     )
 
 

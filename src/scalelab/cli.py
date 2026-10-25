@@ -54,7 +54,7 @@ from scalelab.core.storage import (
 )
 from scalelab.costmodel.calibrate import calibrate, env_versions, load_calibration, save_calibration
 from scalelab.costmodel.comms import COLLECTIVES, collective_time, fit_link
-from scalelab.costmodel.report import DecisionReport, reports_folder
+from scalelab.costmodel.report import DecisionReport, Measurement, reports_folder
 from scalelab.costmodel.rlstep import StepPrediction
 from scalelab.costmodel.roofline import Efficiency, Group
 from scalelab.costmodel.specs import CPU, HARDWARE, HardwareSpec
@@ -80,6 +80,7 @@ from scalelab.rl.experiment import (
 from scalelab.rl.finished import load_finished_run
 from scalelab.rl.gradings import Grading, gradings_folder, load_gradings, save_grading
 from scalelab.rl.loop import SNAPSHOTS, RLStepMetrics
+from scalelab.rl.measure import measure_padding_cut
 from scalelab.rl.overhead import OVERHEAD_BUDGET, measure_overhead
 from scalelab.rl.warmstart_loop import StepMetrics
 from scalelab.telemetry.anomalies import AnomalyEvent, RunHalted
@@ -742,6 +743,33 @@ def cost_validate(hardware_name: str) -> int:
     return 0
 
 
+def decision_report(
+    config: ExperimentConfig, hardware_name: str, micro_batch: int | None = None
+) -> DecisionReport:
+    """What the padding cut would do to `config`'s steps on this hardware (m3s15), with the last
+    cost validate's error band there (validation.json), printing where both came from."""
+    hardware = hardware_spec(hardware_name)
+    efficiencies = efficiencies_for(hardware_name)
+    path = bench_folder(scalelab_home(), hardware_name) / VALIDATION_FILE
+    validation = Validation.model_validate_json(path.read_text()) if path.is_file() else None
+    print(f"validation:    {path if validation else 'none (cost validate saves one)'}")
+    return DecisionReport(
+        change="padding-cut",
+        experiment=config.name,
+        config_hash=hashing.config_hash(config),
+        hardware=hardware_name,
+        baseline=predict_step(config, hardware, efficiencies),
+        candidate=padding_cut(config, hardware, efficiencies, micro_batch),
+        validated=validation.errors["step"] if validation else None,
+    )
+
+
+def save_report(stem: Path, report: DecisionReport | Measurement) -> None:
+    """A report as Markdown and as JSON: <stem>.md and <stem>.json (m3s17)."""
+    atomic_write_text(stem.with_suffix(".md"), report.markdown())
+    atomic_write_text(stem.with_suffix(".json"), report.model_dump_json(indent=2))
+
+
 def cost_compare(
     experiment: Path, overrides: Sequence[str], hardware_name: str, micro_batch: int | None
 ) -> int:
@@ -753,25 +781,52 @@ def cost_compare(
         raise UsageError(f"--micro-batch must be at least 1, not {micro_batch}")
     config, _, _ = resolve(experiment, overrides)
     home = scalelab_home()
-    hardware = hardware_spec(hardware_name)
-    efficiencies = efficiencies_for(hardware_name)
-    path = bench_folder(home, hardware_name) / VALIDATION_FILE
-    validation = Validation.model_validate_json(path.read_text()) if path.is_file() else None
-    print(f"validation:    {path if validation else 'none (cost validate saves one)'}")
-    report = DecisionReport(
-        change="padding-cut",
-        experiment=config.name,
-        config_hash=hashing.config_hash(config),
-        hardware=hardware_name,
-        baseline=predict_step(config, hardware, efficiencies),
-        candidate=padding_cut(config, hardware, efficiencies, micro_batch),
-        validated=validation.errors["step"] if validation else None,
-    )
+    report = decision_report(config, hardware_name, micro_batch)
     stem = reports_folder(home) / f"{report.change}-{report.config_hash}-{hardware_name}"
-    atomic_write_text(stem.with_suffix(".md"), report.markdown())
-    atomic_write_text(stem.with_suffix(".json"), report.model_dump_json(indent=2))
+    save_report(stem, report)
     print(report.markdown())
     print(f"saved:         {stem}.md and .json")
+    return 0
+
+
+def cost_measure(
+    experiment: Path, overrides: Sequence[str], hardware_name: str, steps: int, warmup: int
+) -> int:
+    """`scalelab cost measure` (m3s17): the padding cut, measured. Predicts it as cost compare
+    does and saves that report first; then runs the experiment's first steps twice on this
+    machine, without the cut and with it (RL from its warm start), and saves each part's measured
+    seconds beside the prediction under <home>/reports/. Records nothing in the registry."""
+    if steps < 1 or warmup < 1:
+        raise UsageError(f"--steps and --warmup must be at least 1, got {steps} and {warmup}")
+    config, seed, runtime = resolve(experiment, overrides)
+    device = torch.cuda.get_device_name() if torch.cuda.is_available() else "cpu"
+    if not ran_on(device, hardware_name):
+        raise UsageError(f"--hardware {hardware_name}, but this machine runs steps on its {device}")
+    home = scalelab_home()
+    start = None
+    if config.rl is not None:
+        with registry_copy(home) as registry:
+            start = load_warm_start(config.rl.from_run, config.model, registry, home)
+    print(f"experiment:    {config.name} (config {hashing.config_hash(config)}), seed {seed}")
+    print(f"device:        {device}")
+    report = decision_report(config, hardware_name)
+    stem = reports_folder(home) / f"{report.change}-{report.config_hash}-{hardware_name}"
+    save_report(stem, report)  # the prediction, saved before anything runs
+    before, after = report.baseline.seconds, report.candidate.seconds
+    print(f"predicted:     step {before:.4f} -> {after:.4f} s ({-report.saving:+.1%}), {stem}.md")
+    print(f"steps:         {warmup} to warm up, then {steps} timed; without, then with the cut")
+    deterministic = runtime.deterministic
+    if deterministic is None:
+        deterministic = default_deterministic()
+    try:
+        timed = measure_padding_cut(config, seed, start, deterministic, steps, warmup)
+    except ValueError as err:  # a warm start whose budget ends sooner
+        raise UsageError(str(err)) from None
+    measurement = Measurement(report=report, steps=steps, baseline=timed.off, candidate=timed.on)
+    measured = stem.with_name(f"{stem.name}-measured")
+    save_report(measured, measurement)
+    print(measurement.markdown())
+    print(f"saved:         {measured}.md and .json")
     return 0
 
 
@@ -926,6 +981,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="rows a micro-batch under the cut (default: rl.micro_batch, or a quarter of a warm "
         "start's batch)",
     )
+    measure_parser = cost_commands.add_parser(
+        "measure", help="the padding cut, measured: the same steps without it, then with it"
+    )
+    measure_parser.add_argument("experiment", type=Path, help="e.g. configs/experiments/rl.yaml")
+    measure_parser.add_argument("overrides", nargs="*", help="key=value changes, as for run")
+    measure_parser.add_argument(
+        "--hardware",
+        required=True,
+        choices=["cpu", *HARDWARE],
+        help="this machine's device: the prediction's calibration and error band",
+    )
+    measure_parser.add_argument(
+        "--steps", type=int, default=20, help="steps timed in each run (default 20)"
+    )
+    measure_parser.add_argument(
+        "--warmup", type=int, default=3, help="steps before the timed ones (default 3)"
+    )
 
     comms_parser = cost_commands.add_parser(
         "comms", help="time collectives among processes here, and check the formulas on them"
@@ -956,6 +1028,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cost_validate(args.hardware)
         if args.command == "cost" and args.cost_command == "compare":
             return cost_compare(args.experiment, args.overrides, args.hardware, args.micro_batch)
+        if args.command == "cost" and args.cost_command == "measure":
+            return cost_measure(
+                args.experiment, args.overrides, args.hardware, args.steps, args.warmup
+            )
         if args.command == "cost" and args.cost_command == "comms":
             return cost_comms(args.world, args.backend)
         if args.command == "cost":

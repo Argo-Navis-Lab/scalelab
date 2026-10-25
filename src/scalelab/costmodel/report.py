@@ -94,3 +94,71 @@ class DecisionReport(StrictModel):
                 verdict = f"not worth building: the saving, {self.saving:.1%}, is within the error"
         lines.append(f"- verdict: {verdict}")
         return "\n".join(lines) + "\n"
+
+
+class Measurement(StrictModel):
+    """A DecisionReport's change, measured (m3s17): the same steps run on its device without the
+    change and with it, each part's mean seconds a step from telemetry's laps. The report is made
+    and saved before the steps run, so the prediction can't lean on them."""
+
+    report: DecisionReport
+    steps: int  # timed steps of each run
+    baseline: dict[str, float]  # part -> mean seconds a step, without the change
+    candidate: dict[str, float]  # with it
+
+    @property
+    def speedup(self) -> float:
+        return self.baseline["step"] / self.candidate["step"]
+
+    @property
+    def saving(self) -> float:
+        """The share of a step's time the change saved."""
+        return 1 - self.candidate["step"] / self.baseline["step"]
+
+    @property
+    def error(self) -> float:
+        """How far the predicted speedup is from the measured one, as a share of it."""
+        return self.report.speedup / self.speedup - 1
+
+    @property
+    def held(self) -> bool:
+        """The predicted speedup lands within the model's validated error on this device."""
+        validated = self.report.validated
+        return validated is not None and abs(self.error) <= validated.mape
+
+    def markdown(self) -> str:
+        report = self.report
+        predicted = {
+            name: (phase.seconds, report.candidate.phases[name].seconds)
+            for name, phase in report.baseline.phases.items()
+        }
+        predicted["step"] = (report.baseline.seconds, report.candidate.seconds)
+        lines = [
+            f"# Measured: {report.change}, {report.experiment} on {report.hardware}",
+            "",
+            f"Config {report.config_hash}. The same {self.steps} steps run without the change and "
+            "with it, each part's mean seconds a step, beside the prediction made before they ran.",
+            "",
+            "| part | predicted without s | with s | change "
+            "| measured without s | with s | change |",
+            "|---|---:|---:|---:|---:|---:|---:|",
+        ]
+        for part, (before, after) in predicted.items():
+            off, on = self.baseline[part], self.candidate[part]
+            lines.append(
+                f"| {part} | {before:.4f} | {after:.4f} | {after / before - 1:+.1%} "
+                f"| {off:.4f} | {on:.4f} | {on / off - 1:+.1%} |"
+            )
+        lines += [
+            "",
+            f"- speedup: predicted {report.speedup:.2f}x, measured {self.speedup:.2f}x, so the "
+            f"prediction is off by {self.error:+.1%}",
+        ]
+        if report.validated is None:
+            verdict = f"unjudged: {report.hardware} has no validation (cost validate saves one)"
+        elif self.held:
+            verdict = f"the prediction held: within the {report.validated.mape:.1%} error band"
+        else:
+            verdict = f"the prediction missed: beyond the {report.validated.mape:.1%} error band"
+        lines.append(f"- verdict: {verdict}")
+        return "\n".join(lines) + "\n"

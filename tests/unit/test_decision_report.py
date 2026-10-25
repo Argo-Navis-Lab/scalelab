@@ -4,7 +4,7 @@ the model's validated error on that device."""
 import pytest
 
 from scalelab.costmodel.calibrate import Errors
-from scalelab.costmodel.report import DecisionReport
+from scalelab.costmodel.report import DecisionReport, Measurement
 from scalelab.costmodel.rlstep import PhaseTime, StepPrediction
 
 ERRORS = Errors(samples=28, mape=0.04, bias=0.006, worst=-0.101)  # the T4's at m3s12
@@ -72,3 +72,42 @@ def test_a_change_slower_by_more_than_the_error_says_so() -> None:
     decision = report(step(1.0, 3.0), ERRORS)  # 4 s a step instead of 3
     assert not decision.worth_building
     assert "not worth building: it is 33.3% slower, beyond the error\n" in decision.markdown()
+
+
+# --- added in m3s17: a change, measured -----------------------------------------------------
+
+
+def measured(validated: Errors | None, without: float, with_cut: float) -> Measurement:
+    """The report above (3.0 -> 2.0 s predicted, 1.50x), and two runs' steps as measured."""
+    return Measurement(
+        report=report(step(1.0, 1.0), validated),
+        steps=20,
+        baseline={"generate": 1.1, "train": without - 1.3, "step": without},
+        candidate={"generate": 1.1, "train": with_cut - 1.3, "step": with_cut},
+    )
+
+
+def test_a_measurement_sets_each_part_beside_its_prediction() -> None:
+    measurement = measured(ERRORS, 3.5, 2.5)
+    assert measurement.speedup == pytest.approx(1.4)
+    assert measurement.saving == pytest.approx(2 / 7)
+    assert measurement.error == pytest.approx(1.5 / 1.4 - 1)  # +7.1%: the model expected more
+    assert not measurement.held  # beyond the 4% band
+    text = measurement.markdown()
+    assert text.startswith("# Measured: padding-cut, rl on t4\n")
+    assert "| generate | 1.0000 | 1.0000 | +0.0% | 1.1000 | 1.1000 | +0.0% |\n" in text
+    assert "| train | 2.0000 | 1.0000 | -50.0% | 2.2000 | 1.2000 | -45.5% |\n" in text
+    assert "| step | 3.0000 | 2.0000 | -33.3% | 3.5000 | 2.5000 | -28.6% |\n" in text
+    assert "- speedup: predicted 1.50x, measured 1.40x, so the prediction is off by +7.1%\n" in text
+    assert text.endswith("- verdict: the prediction missed: beyond the 4.0% error band\n")
+    assert Measurement.model_validate_json(measurement.model_dump_json()) == measurement
+
+
+def test_a_prediction_within_the_error_band_held() -> None:
+    measurement = measured(ERRORS, 3.1, 2.1)  # 1.48x measured: 1.50x is off by +1.6%
+    assert measurement.held
+    assert "- verdict: the prediction held: within the 4.0% error band\n" in measurement.markdown()
+    unvalidated = measured(None, 3.1, 2.1)
+    assert not unvalidated.held
+    expected = "- verdict: unjudged: t4 has no validation (cost validate saves one)\n"
+    assert unvalidated.markdown().endswith(expected)

@@ -115,3 +115,29 @@ def test_compare_prints_and_saves_a_decision_report(
     assert report.validated == errors
     assert main(["cost", "compare", str(RL), "--hardware", "cpu", "--micro-batch", "0"]) == 2
     assert "--micro-batch must be at least 1, not 0" in capsys.readouterr().err
+
+
+def test_compare_fp16_needs_fp16_efficiencies(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = ["cost", "compare", str(RL), *SMALL, "--hardware", "cpu", "--change", "fp16"]
+    assert main(argv) == 0  # no calibration: the datasheet's peaks
+    config = load_config(RL, SMALL)
+    stem = home / "reports" / f"fp16-{config_hash(config)}-cpu"
+    report = DecisionReport.model_validate_json(stem.with_suffix(".json").read_text())
+    assert report.change == "fp16"
+    assert report.baseline == predict_step(config, CPU)
+    assert report.candidate == predict_step(config, CPU, precision="fp16")
+    assert stem.with_suffix(".md").read_text() in capsys.readouterr().out
+    assert main([*argv, "--micro-batch", "32"]) == 2
+    assert "--micro-batch sizes the padding cut's pieces, not fp16's" in capsys.readouterr().err
+    fitted = Efficiency(compute=0.5, memory=0.5, launch_s=1e-5)
+    fp32 = {name: fitted for name in get_args(Group) if not name.endswith(".fp16")}
+    path = home / "bench" / "cpu" / "calibration.json"  # fitted before any fp16 bench
+    path.parent.mkdir(parents=True)
+    save_calibration(path, Calibration(hardware="cpu", versions={}, efficiencies=fp32, errors={}))
+    assert main(argv) == 2
+    assert (
+        "the cpu calibration has no attention.fp16, gemm.fp16, gemv-decode.fp16: run `scalelab "
+        "bench --hardware cpu --precision fp16`, then `scalelab cost calibrate --hardware cpu`"
+    ) in capsys.readouterr().err

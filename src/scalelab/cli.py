@@ -57,9 +57,9 @@ from scalelab.core.storage import (
 )
 from scalelab.costmodel.calibrate import calibrate, env_versions, load_calibration, save_calibration
 from scalelab.costmodel.comms import COLLECTIVES, collective_time, fit_link
-from scalelab.costmodel.report import DecisionReport, Measurement, reports_folder
+from scalelab.costmodel.report import CHANGES, Change, DecisionReport, Measurement, reports_folder
 from scalelab.costmodel.rlstep import StepPrediction
-from scalelab.costmodel.roofline import Efficiency, Group
+from scalelab.costmodel.roofline import HALF, Efficiency, Group
 from scalelab.costmodel.specs import CPU, HARDWARE, HardwareSpec, Precision
 from scalelab.costmodel.validate import (
     PARTS,
@@ -757,22 +757,37 @@ def cost_validate(hardware_name: str) -> int:
 
 
 def decision_report(
-    config: ExperimentConfig, hardware_name: str, micro_batch: int | None = None
+    config: ExperimentConfig,
+    hardware_name: str,
+    change: Change = "padding-cut",
+    micro_batch: int | None = None,
 ) -> DecisionReport:
-    """What the padding cut would do to `config`'s steps on this hardware (m3s15), with the last
-    cost validate's error band there (validation.json), printing where both came from."""
+    """What a change would do to `config`'s steps on this hardware (m3s15; fp16: m3s20), with the
+    last cost validate's error band there (validation.json), printing where both came from."""
     hardware = hardware_spec(hardware_name)
     efficiencies = efficiencies_for(hardware_name)
+    if change == "fp16" and efficiencies is not None:  # m3s20: fitted before the fp16 benches?
+        missing = sorted(set(HALF.values()) - set(efficiencies))
+        if missing:
+            raise UsageError(
+                f"the {hardware_name} calibration has no {', '.join(missing)}: run `scalelab "
+                f"bench --hardware {hardware_name} --precision fp16`, then `scalelab cost "
+                f"calibrate --hardware {hardware_name}`"
+            )
+    if change == "fp16":
+        candidate = predict_step(config, hardware, efficiencies, precision="fp16")
+    else:
+        candidate = padding_cut(config, hardware, efficiencies, micro_batch)
     path = bench_folder(scalelab_home(), hardware_name) / VALIDATION_FILE
     validation = Validation.model_validate_json(path.read_text()) if path.is_file() else None
     print(f"validation:    {path if validation else 'none (cost validate saves one)'}")
     return DecisionReport(
-        change="padding-cut",
+        change=change,
         experiment=config.name,
         config_hash=hashing.config_hash(config),
         hardware=hardware_name,
         baseline=predict_step(config, hardware, efficiencies),
-        candidate=padding_cut(config, hardware, efficiencies, micro_batch),
+        candidate=candidate,
         validated=validation.errors["step"] if validation else None,
     )
 
@@ -784,17 +799,23 @@ def save_report(stem: Path, report: DecisionReport | Measurement) -> None:
 
 
 def cost_compare(
-    experiment: Path, overrides: Sequence[str], hardware_name: str, micro_batch: int | None
+    experiment: Path,
+    overrides: Sequence[str],
+    hardware_name: str,
+    change: Change,
+    micro_batch: int | None,
 ) -> int:
-    """`scalelab cost compare` (m3s15): what the padding cut would do to an experiment's steps on
-    this hardware, as a DecisionReport, printed and saved under <home>/reports/ as Markdown and
-    JSON. Its error band is the last cost validate's on this hardware (validation.json). Runs
-    nothing, records nothing in the registry."""
+    """`scalelab cost compare` (m3s15): what a change (the padding cut, or fp16: m3s20) would do
+    to an experiment's steps on this hardware, as a DecisionReport, printed and saved under
+    <home>/reports/ as Markdown and JSON. Its error band is the last cost validate's on this
+    hardware (validation.json). Runs nothing, records nothing in the registry."""
     if micro_batch is not None and micro_batch < 1:
         raise UsageError(f"--micro-batch must be at least 1, not {micro_batch}")
+    if micro_batch is not None and change != "padding-cut":
+        raise UsageError(f"--micro-batch sizes the padding cut's pieces, not {change}'s")
     config, _, _ = resolve(experiment, overrides)
     home = scalelab_home()
-    report = decision_report(config, hardware_name, micro_batch)
+    report = decision_report(config, hardware_name, change, micro_batch)
     stem = reports_folder(home) / f"{report.change}-{report.config_hash}-{hardware_name}"
     save_report(stem, report)
     print(report.markdown())
@@ -987,7 +1008,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="its RL runs, and its calibration.json when it has one",
     )
     compare_parser = cost_commands.add_parser(
-        "compare", help="what the padding cut would do to an experiment's steps (a DecisionReport)"
+        "compare", help="what a change would do to an experiment's steps (a DecisionReport)"
     )
     compare_parser.add_argument("experiment", type=Path, help="e.g. configs/experiments/rl.yaml")
     compare_parser.add_argument("overrides", nargs="*", help="key=value changes, as for run")
@@ -996,6 +1017,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         required=True,
         choices=["cpu", *HARDWARE],
         help="the device: its calibration.json, and validation.json for the error band",
+    )
+    compare_parser.add_argument(
+        "--change",
+        choices=list(CHANGES),
+        default="padding-cut",
+        help="the padding cut (DecisionReport 1, the default) or fp16 autocast (2)",
     )
     compare_parser.add_argument(
         "--micro-batch",
@@ -1049,7 +1076,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "cost" and args.cost_command == "validate":
             return cost_validate(args.hardware)
         if args.command == "cost" and args.cost_command == "compare":
-            return cost_compare(args.experiment, args.overrides, args.hardware, args.micro_batch)
+            return cost_compare(
+                args.experiment, args.overrides, args.hardware, args.change, args.micro_batch
+            )
         if args.command == "cost" and args.cost_command == "measure":
             return cost_measure(
                 args.experiment, args.overrides, args.hardware, args.steps, args.warmup

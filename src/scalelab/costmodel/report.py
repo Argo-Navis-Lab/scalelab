@@ -9,10 +9,17 @@ from scalelab.core.config import StrictModel
 from scalelab.costmodel.calibrate import Errors
 from scalelab.costmodel.rlstep import StepPrediction
 
-Change = Literal["padding-cut"]
+Change = Literal["padding-cut", "fp16"]
 CHANGES: dict[Change, str] = {  # what each change does to a step
     "padding-cut": "rows sorted by length, then run in micro-batches, each padded only to its "
     "own longest row (RL's log-probs too, in rl.micro_batch rows)",
+    "fp16": "autocast float16 (m3s18's graph): matmuls, attention, RoPE, the MLP's activation and "
+    "the KV cache in fp16; weights, norms and the residual stream stay fp32; a GradScaler "
+    "unscales the gradients before clipping",
+}
+FLOPS_NOTES: dict[Change, str] = {  # m3s20: what the FLOPs line means for budgets
+    "padding-cut": "budgets still count the padding (m3s16)",
+    "fp16": "the same matmuls (casts do none), so budgets buy the same steps",
 }
 
 
@@ -71,7 +78,7 @@ class DecisionReport(StrictModel):
             f"- speedup: {self.speedup:.2f}x, {3600 / before.seconds:,.0f} -> "
             f"{3600 / after.seconds:,.0f} steps an hour",
             f"- FLOPs a step: {before.flops:.3g} -> {after.flops:.3g} "
-            f"({after.flops / before.flops - 1:+.1%}): budgets still count the padding (m3s16)",
+            f"({after.flops / before.flops - 1:+.1%}): {FLOPS_NOTES[self.change]}",
         ]
         if self.validated is None:
             lines.append(

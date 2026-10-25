@@ -111,3 +111,12 @@ def test_a_prediction_within_the_error_band_held() -> None:
     assert not unvalidated.held
     expected = "- verdict: unjudged: t4 has no validation (cost validate saves one)\n"
     assert unvalidated.markdown().endswith(expected)
+
+
+def test_an_fp16_report_names_its_change() -> None:
+    decision = report(step(1.0, 1.0), ERRORS).model_copy(update={"change": "fp16"})
+    text = decision.markdown()
+    assert text.startswith("# DecisionReport: fp16, rl on t4\n")
+    assert "The change: autocast float16 (m3s18's graph): matmuls, attention, " in text
+    assert "(-44.4%): the same matmuls (casts do none), so budgets buy the same steps\n" in text
+    assert "padding" not in text

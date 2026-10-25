@@ -7,7 +7,7 @@ import pytest
 
 from scalelab.core.config import ExperimentConfig, load_config
 from scalelab.costmodel.rlstep import predict_warm_start_step
-from scalelab.costmodel.specs import CPU, ModelSpec
+from scalelab.costmodel.specs import CPU, HARDWARE, ModelSpec
 from scalelab.rl.costing import (
     ANSWER_SAMPLES,
     padding_cut,
@@ -104,3 +104,15 @@ def test_the_padding_cut_keeps_the_rows_and_drops_padding() -> None:
     assert padding_cut(warm, CPU).flops < predict_step(warm, CPU).flops
     whole = padding_cut(warm, CPU, micro_batch=64)  # one piece: the batch as it comes
     assert whole.seconds == pytest.approx(predict_step(warm, CPU).seconds, rel=1e-9)
+
+
+def test_specs_take_a_precision() -> None:
+    rl, warm = rl_config(), load_config(EXPERIMENTS / "warmstart.yaml")
+    assert rl_step_spec(rl).precision == "fp32"  # what every run so far computed in
+    assert rl_step_spec(rl, "fp16") == rl_step_spec(rl).model_copy(update={"precision": "fp16"})
+    assert warm_start_step_spec(warm, "fp16").precision == "fp16"
+    t4 = HARDWARE["t4"]
+    for config in (rl, warm):  # m3s20: at the T4's datasheet peaks, fp16 steps are faster
+        fp32, fp16 = predict_step(config, t4), predict_step(config, t4, precision="fp16")
+        assert fp16.flops == fp32.flops  # the same matmuls: budgets buy the same steps
+        assert fp16.seconds < fp32.seconds

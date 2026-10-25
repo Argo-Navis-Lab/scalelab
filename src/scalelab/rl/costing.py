@@ -18,7 +18,7 @@ from scalelab.costmodel.rlstep import (
     predict_warm_start_step,
 )
 from scalelab.costmodel.roofline import Efficiency, Group
-from scalelab.costmodel.specs import HardwareSpec, ModelSpec
+from scalelab.costmodel.specs import HardwareSpec, ModelSpec, Precision
 from scalelab.costmodel.validate import PARTS
 from scalelab.rl.experiment import make_task
 from scalelab.rl.loop import GENERATION_BATCH, sample_problems
@@ -32,11 +32,12 @@ SKIPPED_STEPS = 1  # step 1 also warms up (first allocations, kernel choices): l
 TIMED = {f"system/{part}_s": part for part in PARTS}  # telemetry's laps of a step (m2s29)
 
 
-def rl_step_spec(config: ExperimentConfig) -> RLStepSpec:
+def rl_step_spec(config: ExperimentConfig, precision: Precision = "fp32") -> RLStepSpec:
     """An RL experiment's step as the cost model sees it. Its prompts: the first
     prompts_per_step of ANSWER_SAMPLES problems per difficulty, drawn as the loop draws them.
     Its answers: those problems' worked solutions, what the warm start was taught to write (its
-    own answers are as long on average, and their tail runs a little longer: m3s8)."""
+    own answers are as long on average, and their tail runs a little longer: m3s8). Its precision:
+    what its steps compute in (m3s20: fp16 is autocast's, as m3s18's op graph runs it)."""
     if config.algo is None or config.rl is None:
         raise ValueError(f"{config.name} is a warm start: only RL experiments have RL steps")
     task, _ = make_task(config.task.name, config.task.ops)
@@ -55,6 +56,7 @@ def rl_step_spec(config: ExperimentConfig) -> RLStepSpec:
         micro_batch=config.rl.micro_batch,
         epochs=config.rl.epochs,
         reference=config.algo.kl_coef > 0,
+        precision=precision,
     )
 
 
@@ -76,10 +78,11 @@ def predict_rl_run(
     config: ExperimentConfig,
     hardware: HardwareSpec,
     efficiencies: Mapping[Group, Efficiency] | None = None,
+    precision: Precision = "fp32",
 ) -> RunPrediction:
     """How long an RL experiment's steps take on `hardware`. The loop stops once the FLOPs it
     has spent reach the budget, so a budget of F buys ceil(F / f) steps of f FLOPs."""
-    spec = rl_step_spec(config)
+    spec = rl_step_spec(config, precision)
     step = predict_rl_step(ModelSpec.from_config(config.model), spec, hardware, efficiencies)
     assert config.rl is not None  # rl_step_spec checked
     budget_steps = math.ceil(config.rl.flops / step.flops)
@@ -101,7 +104,9 @@ def measured_step(
     return len(seconds.get("step", [])), means
 
 
-def warm_start_step_spec(config: ExperimentConfig) -> WarmStartStepSpec:
+def warm_start_step_spec(
+    config: ExperimentConfig, precision: Precision = "fp32"
+) -> WarmStartStepSpec:
     """A warm start's step as the cost model sees it (m3s11): its batch, and how long examples
     are: ANSWER_SAMPLES worked examples per difficulty, drawn as the loop draws them (without
     skipping the eval sets' prompts, as the loop does: they are as long as the rest)."""
@@ -115,6 +120,7 @@ def warm_start_step_spec(config: ExperimentConfig) -> WarmStartStepSpec:
     return WarmStartStepSpec(
         lengths=tuple(len(example.prompt) + len(example.answer) for example in examples),
         batch_size=config.warm_start.batch_size,
+        precision=precision,
     )
 
 
@@ -122,12 +128,15 @@ def predict_step(
     config: ExperimentConfig,
     hardware: HardwareSpec,
     efficiencies: Mapping[Group, Efficiency] | None = None,
+    precision: Precision = "fp32",
 ) -> StepPrediction:
-    """Any experiment's expected step on `hardware`: an RL step, or a warm start's (m3s11)."""
+    """Any experiment's expected step on `hardware` in `precision`: an RL step, or a warm start's
+    (m3s11)."""
     if config.rl is not None:
-        return predict_rl_run(config, hardware, efficiencies).step
+        return predict_rl_run(config, hardware, efficiencies, precision).step
     model = ModelSpec.from_config(config.model)
-    return predict_warm_start_step(model, warm_start_step_spec(config), hardware, efficiencies)
+    spec = warm_start_step_spec(config, precision)
+    return predict_warm_start_step(model, spec, hardware, efficiencies)
 
 
 def padding_cut(

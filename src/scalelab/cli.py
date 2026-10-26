@@ -19,6 +19,7 @@ from typing import Any
 import torch
 import yaml
 
+from scalelab.analysis.costreport import load_measurements, write_report
 from scalelab.analysis.reports import gains
 from scalelab.analysis.stats import Interval
 from scalelab.bench.comms import SIZES, Backend, bench_collectives
@@ -646,6 +647,33 @@ def hardware_spec(name: str) -> HardwareSpec:
     return CPU if name == "cpu" else HARDWARE[name]
 
 
+def report_cost(hardware_names: Sequence[str], out: Path) -> int:
+    """`scalelab report cost` (m3s26): Write-up 1's figures and tables, from each device's last
+    cost validate (validation.json, with its runs' steps) and the changes cost measure saved in
+    <home>/reports/ for those devices. Records nothing in the registry."""
+    if not hardware_names:
+        raise UsageError("report cost needs --hardware: the devices to draw")
+    home = scalelab_home()
+    validations: list[Validation] = []
+    for name in sorted(set(hardware_names)):
+        path = bench_folder(home, name) / VALIDATION_FILE
+        if not path.is_file():
+            raise UsageError(f"no {path}: run scalelab cost validate --hardware {name} first")
+        validation = Validation.model_validate_json(path.read_text())
+        if not validation.checks:  # saved before m3s26
+            raise UsageError(
+                f"{path} has no runs' steps: rerun scalelab cost validate --hardware {name}"
+            )
+        validations.append(validation)
+        print(f"validation:    {path} ({len(validation.checks)} runs)")
+    folder = reports_folder(home)
+    measurements = [m for m in load_measurements(folder) if m.report.hardware in hardware_names]
+    print(f"measured:      {len(measurements)} changes in {folder}")
+    for path in write_report(validations, measurements, out):
+        print(f"saved:         {path}")
+    return 0
+
+
 def cost_calibrate(hardware_name: str) -> int:
     """`scalelab cost calibrate`: fits the cost model's efficiencies to the results `scalelab
     bench` saved for this hardware, and saves them beside those results. Records nothing in the
@@ -861,7 +889,7 @@ def cost_validate(hardware_name: str) -> int:
     print(
         f"verdict:       step MAPE {step:.1%}, {verdict} the {TARGET_MAPE:.0%} M3's exit asks for"
     )
-    validation = Validation(hardware=hardware_name, errors=summary)  # m3s15: for cost compare
+    validation = Validation(hardware=hardware_name, errors=summary, checks=checks)  # m3s26: checks
     path = bench_folder(home, hardware_name) / VALIDATION_FILE
     atomic_write_text(path, validation.model_dump_json(indent=2))
     print(f"saved:         {path}")
@@ -1053,7 +1081,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     report_parser = commands.add_parser("report", help="print a report of the recorded runs")
     report_parser.add_argument(
-        "report", choices=["gains"], help="gains: what RL did to greedy pass@1, over seeds"
+        "report",
+        choices=["gains", "cost"],
+        help="gains: what RL did to greedy pass@1, over seeds; cost: Write-up 1's figures, tables",
+    )
+    report_parser.add_argument(
+        "--hardware", nargs="+", default=[], help="cost: the devices, each cost validated"
+    )
+    report_parser.add_argument(
+        "--out",
+        type=Path,
+        default=Path("docs/writeups/figs"),
+        help="cost: where the figures and tables go (default docs/writeups/figs)",
     )
 
     bench_parser = commands.add_parser(
@@ -1190,6 +1229,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return grade(args.run_id, args.problems)
         if args.command == "overhead":
             return overhead(args.experiment, args.overrides, args.steps, args.warmup)
+        if args.command == "report" and args.report == "cost":
+            return report_cost(args.hardware, args.out)
         if args.command == "report":
             return report_gains()
         if args.command == "bench":

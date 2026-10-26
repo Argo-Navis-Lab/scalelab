@@ -137,3 +137,8 @@ def test_the_band_is_the_runtimes_own_step_errors_given_enough_runs() -> None:
     assert band(validation, "fp32 cut") == ("step", 0.01, 0.05)  # too few runs of its own
     assert band(validation, "fp32") == ("step", 0.01, 0.05)
     assert band(Validation(hardware="t4", errors={"step": errors(20, None, None)}), "fp32") is None
+
+
+def test_files_saved_before_m3s26_load_without_runs() -> None:
+    old = Validation.model_validate_json('{"hardware": "t4", "errors": {}}')
+    assert old.checks == []

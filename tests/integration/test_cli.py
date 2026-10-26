@@ -387,6 +387,8 @@ def test_cost_validate_checks_each_run_that_timed_its_steps(
     steps, measured = measured_step(read_metrics(home, timed))
     assert steps >= 1
     check = check_step(timed, predict_rl_run(load_config(RL, rl), CPU).step, steps, measured)
+    saved = Validation.model_validate_json((home / "bench" / "cpu" / "validation.json").read_text())
+    assert {each.run_id for each in saved.checks} == {warm_start, timed}  # m3s26: report cost
     assert "calibration:   none, so the datasheet's peaks" in out
     assert "runs:          2 runs timed their steps (left out 1 with no timed steps)\n" in out
     errors = "".join(f"{check.errors[part]:>+10.1%}" for part in PARTS)

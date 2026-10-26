@@ -13,14 +13,6 @@ VALIDATION_FILE = "validation.json"  # m3s15: cost validate's errors, beside cal
 BAND_MIN_RUNS = 5  # m3s25: fewer runs say too little about how widely the model's errors spread
 
 
-class Validation(StrictModel):
-    """cost validate's errors on one device, saved for cost compare's error band (m3s15)."""
-
-    hardware: str
-    errors: dict[str, Errors]  # each part's, over the runs that timed it
-    # m3s23: with runs of several runtimes, also each one's step, as "step, fp16 cut"
-
-
 class StepCheck(StrictModel):
     """One run's steps: the predicted and the measured seconds a step, for each part it has (a
     warm start's: train and step, m3s11)."""
@@ -34,6 +26,15 @@ class StepCheck(StrictModel):
     def errors(self) -> dict[str, float]:
         """Each part's error, predicted / measured - 1: below 0, the model runs fast."""
         return {part: self.predicted[part] / self.measured[part] - 1 for part in self.predicted}
+
+
+class Validation(StrictModel):
+    """cost validate's errors on one device, saved for cost compare's error band (m3s15)."""
+
+    hardware: str
+    errors: dict[str, Errors]  # each part's, over the runs that timed it
+    # m3s23: with runs of several runtimes, also each one's step, as "step, fp16 cut"
+    checks: list[StepCheck] = []  # m3s26: each run's steps, for report cost (none before m3s26)
 
 
 def check_step(

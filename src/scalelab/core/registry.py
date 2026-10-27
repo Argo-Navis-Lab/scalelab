@@ -559,3 +559,20 @@ class Registry:
             )
         if result.rowcount == 0:
             raise LeaseLostError(f"{worker} no longer holds job {job_id}")
+
+    def release(self, job_id: str, worker: str) -> None:
+        """`worker` gives the job back unfinished (m4s6: its run stopped with a checkpoint
+        saved): queued again, with no owner, for the next lease to resume it. Its attempts
+        stay counted. Raises LeaseLostError if the worker no longer holds it."""
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(jobs)
+                .where(
+                    jobs.c.job_id == job_id,
+                    jobs.c.lease_owner == worker,
+                    jobs.c.state.in_(["leased", "running"]),
+                )
+                .values(state="queued", lease_owner=None, lease_expires_at=None)
+            )
+        if result.rowcount == 0:
+            raise LeaseLostError(f"{worker} no longer holds job {job_id}")

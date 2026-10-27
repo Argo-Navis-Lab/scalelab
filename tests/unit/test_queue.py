@@ -129,3 +129,21 @@ def test_a_finished_job_is_never_leased_again(registry: Registry) -> None:
         registry.complete("s-1", "w", "done")
     with pytest.raises(ValueError, match="not 'queued'"):
         registry.complete("s-1", "w", "queued")
+
+
+def test_a_released_job_is_queued_again_for_anyone(registry: Registry) -> None:
+    submit(registry, "s", 1)
+    assert registry.lease("w1", SHA, "t4", math.inf, 600) is not None
+    registry.release("s-1", "w1")  # m4s6: its run stopped, a checkpoint saved
+    (released,) = registry.list_jobs("s")
+    assert (released.state, released.lease_owner, released.lease_expires_at) == (
+        "queued",
+        None,
+        None,
+    )
+    assert released.attempts == 1
+    with pytest.raises(LeaseLostError):
+        registry.release("s-1", "w1")  # no longer its own
+    again = registry.lease("w2", SHA, "t4", math.inf, 600)
+    assert again is not None
+    assert (again.job_id, again.lease_owner, again.attempts) == ("s-1", "w2", 2)

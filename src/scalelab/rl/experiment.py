@@ -144,6 +144,7 @@ def run_experiment(
     padding_cut: bool = False,
     stop_after: int | None = None,
     precision: Precision = "fp32",
+    on_step: Callable[[StepMetrics], None] | None = None,
 ) -> list[StepMetrics]:
     """Warm-start the config's model on its task, resuming from the latest checkpoint in
     `checkpoint_dir` if there is one. Returns the metrics of every step this call ran.
@@ -154,7 +155,8 @@ def run_experiment(
     each grading goes to `report`. Grading changes nothing about training. Each step's laps
     go to `sink`, if there is one (m3s11). `padding_cut`: runtime.padding_cut (m3s16).
     `stop_after=k` saves after step k and stops, as an interruption would (m3s17).
-    `precision`: runtime.precision (m3s21).
+    `precision`: runtime.precision (m3s21). `on_step`, if given, is called with each step's
+    metrics before grading (m4s6).
     """
     seeds = seed_everything(seed, deterministic)  # PyTorch's generator now follows seeds.init
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -163,6 +165,8 @@ def run_experiment(
     eval_sets = load_eval_sets(task, problem_type, config.task.difficulties, config.eval.problems)
 
     def grade(metrics: StepMetrics) -> None:
+        if on_step is not None:
+            on_step(metrics)  # m4s6: the caller's first (the worker's heartbeat)
         last = metrics.tokens >= config.warm_start.tokens
         due = config.eval.every > 0 and metrics.step % config.eval.every == 0
         if report is not None and (last or due):

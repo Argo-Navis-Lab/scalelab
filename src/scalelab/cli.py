@@ -4,15 +4,17 @@ import argparse
 import contextlib
 import json
 import math
+import os
 import re
 import shutil
 import signal
+import socket
 import sys
 import tempfile
 import time
 import warnings
 from collections import Counter
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple, get_args
 
@@ -301,8 +303,11 @@ def registry_edit(home: Path) -> Generator[Registry]:
         atomic_write_bytes(source, copy.read_bytes())
 
 
-def run(experiment: Path, overrides: Sequence[str]) -> int:
-    """`scalelab run`: resolve the experiment, record it, run it (or resume it), finish it."""
+def run(
+    experiment: Path, overrides: Sequence[str], on_step: Callable[[object], None] | None = None
+) -> int:
+    """`scalelab run`: resolve the experiment, record it, run it (or resume it), finish it.
+    `on_step`, if given, is called after every training step (m4s6: the worker's heartbeat)."""
     config, seed, runtime = resolve(experiment, overrides)
 
     home = scalelab_home(default=runtime.output_dir)
@@ -466,6 +471,7 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
                     sink,
                     padding_cut=runtime.padding_cut,  # m3s16
                     precision=runtime.precision,  # m3s21
+                    on_step=on_step,  # m4s6
                 )
             else:
                 metrics = run_rl_experiment(
@@ -482,6 +488,7 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
                     padding_cut=runtime.padding_cut,  # m3s16
                     precision=runtime.precision,  # m3s22
                     throughput=throughput,  # m3s25
+                    on_step=on_step,
                 )
         except RunHalted as halted:
             registry.finish_run(run_id, "failed")
@@ -941,6 +948,101 @@ def sweep_submit(path: Path, hardware_name: str, session_hours: float) -> int:
     counts = [f"{states[state]} {state}" for state in get_args(JobState) if states[state]]
     print(f"jobs:          {', '.join(counts)}")
     print(f"registry:      {registry_path(home)}")
+    return 0
+
+
+HEARTBEAT_S = 60.0  # m4s6: how often a worker renews the lease of the job it runs
+LEASE_TTL_S = 600.0  # a lease lasts ten heartbeats: a long grading between two steps keeps it
+
+
+def worker(overrides: Sequence[str], session_hours: float) -> int:
+    """`scalelab worker` (m4s6): run the queue's jobs one after another, each in this process
+    through `scalelab run`'s own code (resume, "already done" and exit codes are run's). It
+    leases jobs of sweeps submitted at its own commit, priced on its own hardware, that fit the
+    session's time left at SESSION_MARGIN; only its first lease may take a longer job (one
+    longer than a whole session resumes from its checkpoints, session after session). A
+    heartbeat every HEARTBEAT_S keeps a running job's lease. A run stopped by Ctrl+C gives its
+    job back and stops the worker; a crash fails its job and stops it. `overrides`: runtime
+    settings for every job, such as runtime.local_registry on Colab."""
+    if any(not override.startswith("runtime.") for override in overrides):
+        raise UsageError("a worker takes runtime settings only (runtime.<field>=<value>)")
+    try:
+        runtime = RuntimeConfig.model_validate(split_overrides(overrides)[1])
+    except ValueError as err:  # pydantic's ValidationError is a ValueError
+        raise UsageError(str(err)) from None
+    env = capture_env()
+    if env.git.dirty:
+        raise UsageError("commit your changes first: a worker runs its jobs at its own commit")
+    hardware = this_hardware()
+    if hardware is None:
+        raise UsageError(f"no hardware profile for {torch.cuda.get_device_name()}")
+    name = f"{socket.gethostname()}-{os.getpid()}"  # the lease owner: this process
+    home = scalelab_home(default=runtime.output_dir)
+    at_home = registry_path(home)
+    live = at_home  # as in run(): the registry the jobs' runs write to
+    if runtime.local_registry:
+        live = Path(runtime.local_registry).expanduser().resolve()
+        if at_home.is_file():  # always: sweep submit wrote the copy at home
+            live.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(at_home, live)
+    try:
+        registry = Registry.sqlite(live)
+    except OutdatedRegistryError as err:
+        raise UsageError(str(err)) from None
+
+    def copy_home() -> None:
+        if live != at_home:
+            atomic_write_bytes(at_home, live.read_bytes())
+
+    def work(job: Job) -> int:
+        """Run one leased job, renewing its lease every HEARTBEAT_S; its run's exit code."""
+        last_beat = time.monotonic()
+
+        def beat(_: object) -> None:  # after every training step
+            nonlocal last_beat
+            if time.monotonic() - last_beat >= HEARTBEAT_S:
+                registry.heartbeat(job.job_id, name, LEASE_TTL_S)
+                copy_home()
+                last_beat = time.monotonic()
+
+        registry.heartbeat(job.job_id, name, LEASE_TTL_S)  # leased -> running
+        copy_home()
+        try:
+            return run(Path(job.experiment), [*job.overrides, *overrides], on_step=beat)
+        except UsageError as err:  # it can't run (say, its warm start isn't done): it fails
+            print(f"scalelab: error: {err}", file=sys.stderr)
+            return EXIT_USAGE
+        except Exception:
+            registry.complete(job.job_id, name, "failed")
+            copy_home()
+            raise
+
+    deadline = time.monotonic() + session_hours * 3600
+    print(f"worker:        {name} at {env.git.sha[:8]} on {hardware}, {session_hours:g} h session")
+    print(f"registry:      {live}")
+    finished: Counter[str] = Counter()
+    while True:
+        fit = (deadline - time.monotonic()) / SESSION_MARGIN
+        job = registry.lease(name, env.git.sha, hardware, fit, LEASE_TTL_S)
+        if job is None and not finished:  # the session's first job may outlast it
+            job = registry.lease(name, env.git.sha, hardware, math.inf, LEASE_TTL_S)
+        if job is None:
+            break
+        print(f"job:           {job.job_id}, attempt {job.attempts}, {duration(job.seconds)}")
+        code = work(job)
+        if code == EXIT_INTERRUPTED:
+            registry.release(job.job_id, name)
+            copy_home()
+            print(f"job:           {job.job_id} stopped: back in the queue")
+            return EXIT_INTERRUPTED
+        state = "done" if code == 0 else "failed"
+        registry.complete(job.job_id, name, state)
+        copy_home()
+        finished[state] += 1
+        print(f"job:           {job.job_id} {state}")
+    left = max(deadline - time.monotonic(), 0) / 3600
+    ran = ", ".join(f"{count} {state}" for state, count in finished.items()) or "none"
+    print(f"worker:        nothing left to lease in the {left:.1f} h left (jobs run: {ran})")
     return 0
 
 
@@ -1423,6 +1525,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             default=12.0,
             help="how long a session lasts (default 12: Colab's free tier)",
         )
+    worker_parser = commands.add_parser(
+        "worker", help="run the queued jobs one after another, while they fit the time left"
+    )
+    worker_parser.add_argument(
+        "overrides",
+        nargs="*",
+        help="runtime settings for every job, e.g. runtime.local_registry=/content/registry.db",
+    )
+    worker_parser.add_argument(
+        "--session-hours",
+        type=float,
+        default=12.0,
+        help="how long this session lasts (default 12: Colab's free tier)",
+    )
 
     args = parser.parse_args(argv)
     try:
@@ -1461,6 +1577,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return sweep_plan(args.sweep, args.hardware, args.session_hours)[2]
         if args.command == "cost":
             return cost_predict(args.experiment, args.overrides, args.hardware, args.session_hours)
+        if args.command == "worker":
+            return worker(args.overrides, args.session_hours)
         return run(args.experiment, args.overrides)
     except UsageError as err:
         print(f"scalelab: error: {err}", file=sys.stderr)

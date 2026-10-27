@@ -1,4 +1,4 @@
-"""m3s17: a change, measured: the same steps timed without it and with it (fp16 too: m3s24)."""
+"""m3s17: a change, measured: the same steps without it and with it (fp16: m3s24, both: m4s2)."""
 
 from pathlib import Path
 from typing import Any
@@ -32,6 +32,7 @@ TINY_RL = [
 RUNTIMES: list[tuple[Change, list[tuple[bool, Precision]]]] = [
     ("padding-cut", [(False, "fp32"), (True, "fp32")]),
     ("fp16", [(False, "fp32"), (False, "fp16")]),
+    ("fp16-cut", [(False, "fp32"), (True, "fp16")]),  # m4s2
 ]
 
 

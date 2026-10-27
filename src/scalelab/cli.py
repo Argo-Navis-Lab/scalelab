@@ -60,7 +60,14 @@ from scalelab.core.storage import (
 )
 from scalelab.costmodel.calibrate import calibrate, env_versions, load_calibration, save_calibration
 from scalelab.costmodel.comms import COLLECTIVES, collective_time, fit_link
-from scalelab.costmodel.report import CHANGES, Change, DecisionReport, Measurement, reports_folder
+from scalelab.costmodel.report import (
+    CHANGE_RUNTIMES,
+    CHANGES,
+    Change,
+    DecisionReport,
+    Measurement,
+    reports_folder,
+)
 from scalelab.costmodel.rlstep import StepPrediction
 from scalelab.costmodel.roofline import HALF, Efficiency, Group
 from scalelab.costmodel.specs import CPU, HARDWARE, HardwareSpec, Precision
@@ -907,16 +914,17 @@ def decision_report(
     hardware = hardware_spec(hardware_name)
     efficiencies = efficiencies_for(hardware_name)
     missing = missing_half(efficiencies)
-    if change == "fp16" and missing:  # m3s20: fitted before the fp16 benches?
+    runtime = CHANGE_RUNTIMES[change]  # m4s2
+    if runtime.precision == "fp16" and missing:  # m3s20: fitted before the fp16 benches?
         raise UsageError(
             f"the {hardware_name} calibration has no {', '.join(missing)}: run `scalelab "
             f"bench --hardware {hardware_name} --precision fp16`, then `scalelab cost "
             f"calibrate --hardware {hardware_name}`"
         )
-    if change == "fp16":
-        candidate = predict_step(config, hardware, efficiencies, precision="fp16")
+    if runtime.padding_cut:
+        candidate = padding_cut(config, hardware, efficiencies, micro_batch, runtime.precision)
     else:
-        candidate = padding_cut(config, hardware, efficiencies, micro_batch)
+        candidate = predict_step(config, hardware, efficiencies, runtime.precision)
     path = bench_folder(scalelab_home(), hardware_name) / VALIDATION_FILE
     validation = Validation.model_validate_json(path.read_text()) if path.is_file() else None
     print(f"validation:    {path if validation else 'none (cost validate saves one)'}")
@@ -950,7 +958,7 @@ def cost_compare(
     hardware (validation.json). Runs nothing, records nothing in the registry."""
     if micro_batch is not None and micro_batch < 1:
         raise UsageError(f"--micro-batch must be at least 1, not {micro_batch}")
-    if micro_batch is not None and change != "padding-cut":
+    if micro_batch is not None and not CHANGE_RUNTIMES[change].padding_cut:
         raise UsageError(f"--micro-batch sizes the padding cut's pieces, not {change}'s")
     config, _, _ = resolve(experiment, overrides)
     home = scalelab_home()
@@ -1178,7 +1186,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--change",
         choices=list(CHANGES),
         default="padding-cut",
-        help="the padding cut (DecisionReport 1, the default) or fp16 autocast (2)",
+        help="the padding cut (DecisionReport 1, the default), fp16 autocast (2) or both",
     )
     compare_parser.add_argument(
         "--micro-batch",
@@ -1195,7 +1203,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--change",
         choices=list(CHANGES),
         default="padding-cut",
-        help="the padding cut (the default) or fp16 autocast (m3s24)",
+        help="the padding cut (the default), fp16 autocast (m3s24) or both (m4s2)",
     )
     measure_parser.add_argument(
         "--hardware",

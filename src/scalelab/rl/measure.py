@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from scalelab.core.checkpoint import CheckpointPolicy
-from scalelab.core.config import ExperimentConfig, Precision
-from scalelab.costmodel.report import Change
+from scalelab.core.config import ExperimentConfig, RuntimeConfig
+from scalelab.costmodel.report import CHANGE_RUNTIMES, Change
 from scalelab.models.transformer import Transformer
 from scalelab.rl.costing import measured_step
 from scalelab.rl.experiment import run_experiment, run_rl_experiment
@@ -37,7 +37,7 @@ def measure_change(
     warmup: int = 3,
 ) -> Timed:
     """Run the first `warmup + steps` steps of `config` twice, in fp32 without the padding cut
-    and then with `change` (runtime.padding_cut, m3s17; runtime.precision fp16, m3s24), and
+    and then in `change`'s runtime (CHANGE_RUNTIMES: the cut, m3s17; fp16, m3s24; both, m4s2), and
     average each part's laps over the last `steps` of each. An RL experiment trains its own copy
     of `start` (its warm start) each time; a warm start begins from its seed (`start` None).
     Both runs draw the same data; the cut does the same math, to rounding (m3s16), while fp16
@@ -54,12 +54,10 @@ def measure_change(
         rl = config.rl.model_copy(update={"max_steps": last, "flops": math.inf})
         config = config.model_copy(update={"rl": rl})
 
-    def timed(home: Path, applied: Change | None) -> dict[str, float]:
+    def timed(home: Path, runtime: RuntimeConfig) -> dict[str, float]:
         sink = MetricsSink(home, RUN_ID)
         policy = CheckpointPolicy(every_seconds=None)  # saved once, after the last step
         checkpoints = home / "checkpoints"
-        padding_cut = applied == "padding-cut"
-        precision: Precision = "fp16" if applied == "fp16" else "fp32"
         if start is None:
             run_experiment(
                 config,
@@ -69,9 +67,9 @@ def measure_change(
                 policy,
                 deterministic,
                 sink=sink,
-                padding_cut=padding_cut,
+                padding_cut=runtime.padding_cut,
                 stop_after=last,
-                precision=precision,
+                precision=runtime.precision,
             )
         else:
             run_rl_experiment(
@@ -83,8 +81,8 @@ def measure_change(
                 policy,
                 deterministic,
                 sink=sink,
-                padding_cut=padding_cut,
-                precision=precision,
+                padding_cut=runtime.padding_cut,
+                precision=runtime.precision,
             )
         count, seconds = measured_step(read_metrics(home, RUN_ID), skip=warmup)
         if count < steps:  # the sink's rows reach disk with the save after the last step
@@ -95,6 +93,6 @@ def measure_change(
         return seconds
 
     with tempfile.TemporaryDirectory() as folder:
-        off = timed(Path(folder) / "off", None)
-        on = timed(Path(folder) / "on", change)
+        off = timed(Path(folder) / "off", RuntimeConfig())
+        on = timed(Path(folder) / "on", CHANGE_RUNTIMES[change])
     return Timed(off, on)

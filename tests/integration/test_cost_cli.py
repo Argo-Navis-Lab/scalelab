@@ -141,3 +141,22 @@ def test_compare_fp16_needs_fp16_efficiencies(
         "the cpu calibration has no attention.fp16, gemm.fp16, gemv-decode.fp16: run `scalelab "
         "bench --hardware cpu --precision fp16`, then `scalelab cost calibrate --hardware cpu`"
     ) in capsys.readouterr().err
+
+
+# --- added in m4s2: fp16 and the cut together -------------------------------------------------
+
+
+def test_compare_fp16_cut_predicts_both_changes_at_once(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = ["cost", "compare", str(RL), *SMALL, "--hardware", "cpu", "--change", "fp16-cut"]
+    assert main([*argv, "--micro-batch", "32"]) == 0  # the cut's pieces can still be sized
+    config = load_config(RL, SMALL)
+    stem = home / "reports" / f"fp16-cut-{config_hash(config)}-cpu"
+    report = DecisionReport.model_validate_json(stem.with_suffix(".json").read_text())
+    assert report.change == "fp16-cut"
+    assert report.baseline == predict_step(config, CPU)
+    assert report.candidate == padding_cut(config, CPU, None, 32, "fp16")
+    assert report.candidate != padding_cut(config, CPU, None, 32)  # not the cut alone
+    assert report.candidate != predict_step(config, CPU, precision="fp16")  # nor fp16 alone
+    assert "The change: fp16 and the padding cut together, each as above" in capsys.readouterr().out

@@ -5,21 +5,29 @@ measured ones there."""
 from pathlib import Path
 from typing import Literal
 
-from scalelab.core.config import StrictModel
+from scalelab.core.config import RuntimeConfig, StrictModel
 from scalelab.costmodel.calibrate import Errors
 from scalelab.costmodel.rlstep import StepPrediction
 
-Change = Literal["padding-cut", "fp16"]
+Change = Literal["padding-cut", "fp16", "fp16-cut"]
 CHANGES: dict[Change, str] = {  # what each change does to a step
     "padding-cut": "rows sorted by length, then run in micro-batches, each padded only to its "
     "own longest row (RL's log-probs too, in rl.micro_batch rows)",
     "fp16": "autocast float16 (m3s18's graph): matmuls, attention, RoPE, the MLP's activation and "
     "the KV cache in fp16; weights, norms and the residual stream stay fp32; a GradScaler "
     "unscales the gradients before clipping",
+    "fp16-cut": "fp16 and the padding cut together, each as above (M4's runtime from m2 up, m4s1)",
 }
 FLOPS_NOTES: dict[Change, str] = {  # m3s20: what the FLOPs line means for budgets
     "padding-cut": "budgets still count the padding (m3s16)",
     "fp16": "the same matmuls (casts do none), so budgets buy the same steps",
+    "fp16-cut": "budgets still count the padding (m3s16), and casts do no matmuls",
+}
+# m4s2: the runtime each change runs its steps in; without one, RuntimeConfig(): fp32, uncut
+CHANGE_RUNTIMES: dict[Change, RuntimeConfig] = {
+    "padding-cut": RuntimeConfig(padding_cut=True),
+    "fp16": RuntimeConfig(precision="fp16"),
+    "fp16-cut": RuntimeConfig(padding_cut=True, precision="fp16"),
 }
 
 

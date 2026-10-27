@@ -28,7 +28,7 @@ RL_PHASES: tuple[Phase, ...] = ("generate", "logprobs", "train")
 BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
 INK, MUTED, GRID, SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
 BOUND_COLORS: dict[Bound, str] = {"compute": BLUE, "memory": ORANGE, "launch": AQUA}
-CHANGE_COLORS: dict[Change, str] = {"padding-cut": BLUE, "fp16": ORANGE}
+CHANGE_COLORS: dict[Change, str] = {"padding-cut": BLUE, "fp16": ORANGE, "fp16-cut": AQUA}
 KIND_MARKERS = {"RL": "o", "warm start": "s"}
 
 

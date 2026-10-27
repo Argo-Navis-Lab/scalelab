@@ -1,10 +1,20 @@
 """DecisionReport (m3s15): a change's step against the baseline's, phase by phase, judged against
 the model's validated error on that device."""
 
+from typing import get_args
+
 import pytest
 
+from scalelab.core.config import RuntimeConfig
 from scalelab.costmodel.calibrate import Errors
-from scalelab.costmodel.report import DecisionReport, Measurement
+from scalelab.costmodel.report import (
+    CHANGE_RUNTIMES,
+    CHANGES,
+    FLOPS_NOTES,
+    Change,
+    DecisionReport,
+    Measurement,
+)
 from scalelab.costmodel.rlstep import PhaseTime, StepPrediction
 
 ERRORS = Errors(samples=28, mape=0.04, bias=0.006, worst=-0.101)  # the T4's at m3s12
@@ -120,3 +130,14 @@ def test_an_fp16_report_names_its_change() -> None:
     assert "The change: autocast float16 (m3s18's graph): matmuls, attention, " in text
     assert "(-44.4%): the same matmuls (casts do none), so budgets buy the same steps\n" in text
     assert "padding" not in text
+
+
+# --- added in m4s2: fp16 and the cut together -------------------------------------------------
+
+
+def test_every_change_says_what_it_does_and_has_a_runtime_of_its_own() -> None:
+    assert set(CHANGES) == set(FLOPS_NOTES) == set(CHANGE_RUNTIMES) == set(get_args(Change))
+    runtimes = list(CHANGE_RUNTIMES.values())
+    assert RuntimeConfig() not in runtimes  # the baseline: fp32, uncut
+    assert len(set(runtimes)) == len(runtimes)
+    assert CHANGE_RUNTIMES["fp16-cut"] == RuntimeConfig(padding_cut=True, precision="fp16")

@@ -1,6 +1,8 @@
 from pathlib import Path
+from typing import get_args
 
 from scalelab.analysis.costreport import (
+    CHANGE_COLORS,
     CHANGES_FIGURE,
     PHASES_FIGURE,
     STEPS_FIGURE,
@@ -115,3 +117,7 @@ def test_figures_with_nothing_to_draw_are_left_out(tmp_path: Path) -> None:
     assert [path.name for path in warm_only] == [STEPS_FIGURE, CHANGES_FIGURE, TABLES]
     nothing_measured = write_report([validation()], [], tmp_path / "bare")
     assert [path.name for path in nothing_measured] == [STEPS_FIGURE, TABLES]
+
+
+def test_every_change_has_a_color() -> None:  # m4s2: fp16-cut is drawn in aqua
+    assert set(CHANGE_COLORS) == set(get_args(Change))

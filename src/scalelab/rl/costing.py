@@ -10,6 +10,7 @@ from collections.abc import Iterable, Mapping
 import numpy as np
 
 from scalelab.core.config import ExperimentConfig, RuntimeConfig, StrictModel
+from scalelab.costmodel.memory import generation_memory, training_memory
 from scalelab.costmodel.rlstep import (
     RLStepSpec,
     StepPrediction,
@@ -227,3 +228,48 @@ def predict_gradings(
     return GradingPrediction(
         steps=tuple(grading_steps(config, steps)), greedy=greedy, sampled=sampled
     )
+
+
+class JobPrediction(StrictModel):
+    """One run on one device (m4s4), as `sweep plan` prices it: its steps, each one's seconds
+    in the run's precision and with its padding cut, its gradings, and the memory it needs."""
+
+    steps: int
+    step: float  # seconds
+    gradings: float  # seconds: an RL run's (a warm start's gradings come on top)
+    memory: int  # bytes: training or generating, whichever needs more
+
+    @property
+    def seconds(self) -> float:
+        return self.step * self.steps + self.gradings
+
+
+def predict_job(
+    config: ExperimentConfig,
+    runtime: RuntimeConfig,
+    hardware: HardwareSpec,
+    efficiencies: Mapping[Group, Efficiency] | None = None,
+) -> JobPrediction:
+    """How long a run of `config` takes on `hardware` with these runtime settings, and the
+    memory its training and its generating each need alone, by A's memory model (16-bit
+    numbers: M4 runs in fp16). A warm start takes as many steps as its token budget buys: a
+    batch reads every position of its rows but the last."""
+    step = predict_run_step(config, runtime, hardware, efficiencies).seconds
+    model = ModelSpec.from_config(config.model)
+    context = config.model.context
+    if config.rl is None:
+        spec = warm_start_step_spec(config, runtime.precision)
+        read = spec.batch_size * statistics.fmean(length - 1 for length in spec.lengths)
+        steps = math.ceil(config.warm_start.tokens / read)
+        rows = spec.batch_size
+        if runtime.padding_cut:
+            rows = math.ceil(rows / WARM_START_PIECES)
+        memory = training_memory(model, rows, context).total
+        return JobPrediction(steps=steps, step=step, gradings=0.0, memory=memory)
+    run = predict_rl_run(config, hardware, efficiencies, runtime.precision)
+    gradings = predict_gradings(config, run.steps, hardware, efficiencies)
+    memory = max(
+        training_memory(model, config.rl.micro_batch, context).total,
+        generation_memory(model, GENERATION_BATCH, context).total,
+    )
+    return JobPrediction(steps=run.steps, step=step, gradings=gradings.seconds, memory=memory)

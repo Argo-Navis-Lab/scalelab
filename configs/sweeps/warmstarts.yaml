@@ -1,0 +1,14 @@
+# m4s4: M4's warm starts (the M4 plan, step 7): 100 million tokens on every arithmetic band
+# for m1-m5, seed 0, on the T4 in fp16, the padding cut from m3 up (m4s2 judged: it slows m2).
+name: warmstarts
+experiment: configs/experiments/warmstart.yaml
+overrides:
+  - runtime.precision=fp16
+axes:
+  model:
+    - model=ladder_s/m1
+    - model=ladder_s/m2
+    - [model=ladder_s/m3, runtime.padding_cut=true]
+    - [model=ladder_s/m4, runtime.padding_cut=true]
+    - [model=ladder_s/m5, runtime.padding_cut=true]
+seeds: [0]

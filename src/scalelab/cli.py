@@ -58,8 +58,10 @@ from scalelab.core.storage import (
     registry_path,
     scalelab_home,
 )
+from scalelab.core.sweep import expand, load_sweep
 from scalelab.costmodel.calibrate import calibrate, env_versions, load_calibration, save_calibration
 from scalelab.costmodel.comms import COLLECTIVES, collective_time, fit_link
+from scalelab.costmodel.memory import RESERVED_FRACTION
 from scalelab.costmodel.report import (
     CHANGE_RUNTIMES,
     CHANGES,
@@ -86,6 +88,7 @@ from scalelab.rl.costing import (
     measured_step,
     padding_cut,
     predict_gradings,
+    predict_job,
     predict_rl_run,
     predict_run_step,
     predict_step,
@@ -787,6 +790,78 @@ def cost_predict(
     return 0
 
 
+# m4s4: sweep plan's session fit allows 1.35x the cost model's hours, its worst optimistic miss
+# on a runtime M4 uses (m4s2 judged: a warm start of m1 in fp16)
+SESSION_MARGIN = 1.35
+
+
+def sweep_plan(path: Path, hardware_name: str, session_hours: float) -> int:
+    """`scalelab sweep plan` (m4s4): every job a sweep file asks for, in order, each priced by
+    the cost model on this hardware: its steps, hours and memory, and the sessions it needs at
+    SESSION_MARGIN times its predicted hours. Checks that every job's config composes and that
+    no two jobs are the same run. Runs nothing, records nothing. Exit 1 if a job needs more
+    memory than the device has."""
+    try:
+        sweep = load_sweep(path)
+    except (ValueError, OSError) as err:  # pydantic's ValidationError is a ValueError
+        raise UsageError(f"{path}: {err}") from None
+    jobs = expand(sweep)
+    print(f"sweep:         {sweep.name}: {len(jobs)} jobs of {sweep.experiment}")
+    print(f"hardware:      {hardware_name}")
+    efficiencies = efficiencies_for(hardware_name)
+    hardware = hardware_spec(hardware_name)
+    usable = hardware.memory_bytes * (1 - RESERVED_FRACTION)
+    seen: dict[tuple[str, int], int] = {}  # (config hash, seed) -> its job's number
+    total = 0.0
+    sessions: list[int] = []  # each job's, at SESSION_MARGIN
+    too_big: list[int] = []  # the numbers of the jobs that need more memory than there is
+    print(f"job  {'config':<18}seed  runtime     steps  s/step  hours   GiB  sessions")
+    for number, overrides in enumerate(jobs, start=1):
+        try:
+            config, seed, runtime = resolve(sweep.experiment, overrides)
+        except UsageError as err:
+            raise UsageError(f"job {number} ({' '.join(overrides)}): {err}") from None
+        run = (hashing.config_hash(config), seed)
+        if run in seen:
+            raise UsageError(
+                f"jobs {seen[run]} and {number} are the same run: config {run[0]}, seed {seed}"
+            )
+        seen[run] = number
+        job = predict_job(config, runtime, hardware, efficiencies)
+        total += job.seconds
+        sessions.append(math.ceil(job.seconds * SESSION_MARGIN / (session_hours * 3600)))
+        if job.memory > usable:
+            too_big.append(number)
+        fit = "too big" if number in too_big else str(sessions[-1])
+        print(
+            f"{number:>3}  {run[0]:<18}{seed:>4}  {runtime_label(runtime):<10}{job.steps:>7}"
+            f"{job.step:>8.3f}{job.seconds / 3600:>7.2f}{job.memory / 2**30:>6.1f}  {fit}"
+        )
+    print(
+        f"total:         {total / 3600:.1f} h predicted, "
+        f"{total * SESSION_MARGIN / 3600:.1f} h at {SESSION_MARGIN}x"
+    )
+    one = f"one {session_hours:g} h session at {SESSION_MARGIN}x"
+    if sessions.count(1) == len(jobs):
+        print(f"sessions:      every job fits in {one}")
+    else:
+        print(
+            f"sessions:      {sessions.count(1)} of {len(jobs)} jobs fit in {one}; "
+            "the rest resume from checkpoints"
+        )
+    print("not priced:    checkpoints, start-up, and warm starts' gradings")
+    if too_big:
+        jobs_text = "job " if len(too_big) == 1 else "jobs "
+        verb = "needs" if len(too_big) == 1 else "need"
+        print(
+            f"memory:        {jobs_text}{', '.join(map(str, too_big))} {verb} more than the "
+            f"{usable / 2**30:.1f} GiB usable"
+        )
+        return 1
+    print(f"memory:        every job fits in the {usable / 2**30:.1f} GiB usable")
+    return 0
+
+
 def ran_on(label: str, hardware_name: str) -> bool:
     """Did a run whose registry hardware label is `label` run on this one device? Runs on
     several GPUs ("2x Tesla T4") don't count: the step model times one device."""
@@ -1245,6 +1320,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="gloo: processes on the CPU (default); nccl: one GPU each",
     )
 
+    sweep_parser = commands.add_parser("sweep", help="many runs of one experiment")
+    sweep_commands = sweep_parser.add_subparsers(dest="sweep_command", required=True)
+    plan_parser = sweep_commands.add_parser(
+        "plan", help="list a sweep's jobs and price each one; runs and records nothing"
+    )
+    plan_parser.add_argument("sweep", type=Path, help="e.g. configs/sweeps/warmstarts.yaml")
+    plan_parser.add_argument(
+        "--hardware",
+        required=True,
+        choices=["cpu", *HARDWARE],
+        help="the device the jobs will run on: its calibration.json, when it has one",
+    )
+    plan_parser.add_argument(
+        "--session-hours",
+        type=float,
+        default=12.0,
+        help="how long a session lasts (default 12: Colab's free tier)",
+    )
+
     args = parser.parse_args(argv)
     try:
         if args.command == "grade":
@@ -1276,6 +1370,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.command == "cost" and args.cost_command == "comms":
             return cost_comms(args.world, args.backend)
+        if args.command == "sweep":
+            return sweep_plan(args.sweep, args.hardware, args.session_hours)
         if args.command == "cost":
             return cost_predict(args.experiment, args.overrides, args.hardware, args.session_hours)
         return run(args.experiment, args.overrides)

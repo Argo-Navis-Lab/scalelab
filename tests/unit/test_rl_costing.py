@@ -1,5 +1,7 @@
 """An RL experiment's step and whole run, as the cost model sees them (m3s9)."""
 
+import math
+import statistics
 from inspect import signature
 from pathlib import Path
 
@@ -7,6 +9,7 @@ import numpy as np
 import pytest
 
 from scalelab.core.config import ExperimentConfig, RuntimeConfig, load_config
+from scalelab.costmodel.memory import generation_memory, training_memory
 from scalelab.costmodel.rlstep import generation_time, predict_rl_step, predict_warm_start_step
 from scalelab.costmodel.specs import CPU, HARDWARE, ModelSpec
 from scalelab.rl.costing import (
@@ -16,6 +19,7 @@ from scalelab.rl.costing import (
     SAMPLED_BATCH,
     padding_cut,
     predict_gradings,
+    predict_job,
     predict_rl_run,
     predict_run_step,
     predict_step,
@@ -180,3 +184,30 @@ def test_a_run_grades_greedy_at_every_grading_and_samples_at_the_ends() -> None:
     assert 0 < run.greedy < run.sampled  # 4 answers to a problem cost more than 1
     with pytest.raises(ValueError, match="is a warm start"):
         predict_gradings(load_config(EXPERIMENTS / "warmstart.yaml", []), 100, CPU)
+
+
+def test_an_rl_job_is_its_steps_in_its_runtime_and_its_gradings() -> None:  # m4s4
+    config, t4 = rl_config("rl.max_steps=10"), HARDWARE["t4"]
+    runtime = RuntimeConfig(precision="fp16", padding_cut=True)
+    job = predict_job(config, runtime, t4)
+    assert job.steps == predict_rl_run(config, t4, precision="fp16").steps == 10
+    assert job.step == predict_run_step(config, runtime, t4).seconds
+    assert job.gradings == predict_gradings(config, 10, t4).seconds
+    assert job.seconds == pytest.approx(10 * job.step + job.gradings, rel=1e-12)
+    model = ModelSpec.from_config(config.model)
+    training = training_memory(model, 64, 256).total  # rl.micro_batch rows of the whole context
+    assert job.memory == max(training, generation_memory(model, GENERATION_BATCH, 256).total)
+
+
+def test_a_warm_start_job_takes_the_steps_its_token_budget_buys() -> None:  # m4s4
+    config = load_config(EXPERIMENTS / "warmstart.yaml", ["warm_start.tokens=1000000"])
+    lengths = warm_start_step_spec(config).lengths
+    whole = predict_job(config, RuntimeConfig(), CPU)
+    assert whole.steps == math.ceil(1_000_000 / (64 * statistics.fmean(n - 1 for n in lengths)))
+    assert whole.gradings == 0
+    cut = predict_job(config, RuntimeConfig(padding_cut=True), CPU)
+    assert cut.steps == whole.steps
+    assert cut.step == padding_cut(config, CPU).seconds
+    model = ModelSpec.from_config(config.model)
+    assert whole.memory == training_memory(model, 64, 256).total
+    assert cut.memory == training_memory(model, 16, 256).total  # the cut's pieces of 16 rows

@@ -1,0 +1,14 @@
+# m4s4: a sweep small enough for a laptop's CPU, to try sweep plan (and later the queue and
+# the worker) on: 10 RL steps of 2-digit multiplication from the local m1 warm start (1M
+# tokens), GRPO and RLOO, 2 seeds.
+name: local
+experiment: configs/experiments/rl.yaml
+overrides:
+  - rl.from_run=f26ac1e103fdc0a6-s0-e690df01
+  - task.ops=*
+  - task.difficulties=[2]
+  - rl.max_steps=10
+  - eval.every=5
+axes:
+  algo: [algo=grpo, algo=rloo]
+seeds: [0, 1]

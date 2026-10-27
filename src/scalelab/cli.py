@@ -85,6 +85,7 @@ from scalelab.models.transformer import Transformer
 from scalelab.rl.costing import (
     measured_step,
     padding_cut,
+    predict_gradings,
     predict_rl_run,
     predict_run_step,
     predict_step,
@@ -164,6 +165,12 @@ def flops_speed(flops: float, seconds: float, done: float, budget: float) -> str
     per_second = flops / seconds
     left = max(0.0, budget - done) / per_second
     return f"{per_second:.2e} FLOPs/s, about {duration(left)} to go"
+
+
+def sampled_rate(result: SampledResult | None) -> str:
+    """A sampled result's pass@1 for a progress line, " (sampled 12.3%)"; "" without one: the
+    gradings between the first and the last sample nothing (m4s3)."""
+    return "" if result is None else f" (sampled {result.pass_at(1):.1%})"
 
 
 def eval_records(
@@ -368,9 +375,9 @@ def run(experiment: Path, overrides: Sequence[str]) -> int:
         for record in eval_records(run_id, step, greedy, sampled):
             registry.record_eval(record)
         copy_home()
-        by_name = {result.name: result for result in sampled}
+        by_name = {result.name: result for result in sampled}  # m4s3: none between the ends
         rates = "  ".join(
-            f"{result.name} {result.pass_rate:.1%} (sampled {by_name[result.name].pass_at(1):.1%})"
+            f"{result.name} {result.pass_rate:.1%}{sampled_rate(by_name.get(result.name))}"
             for result in greedy
             if "/" not in result.name  # whole sets only: the parts are in the registry
         )
@@ -750,7 +757,8 @@ def cost_predict(
     print(f"experiment:    {config.name} (config {hashing.config_hash(config)})")
     print(f"hardware:      {hardware_name}")
     efficiencies = efficiencies_for(hardware_name)
-    run = predict_rl_run(config, hardware_spec(hardware_name), efficiencies)
+    hardware = hardware_spec(hardware_name)
+    run = predict_rl_run(config, hardware, efficiencies)
     answers = [length for lengths in run.spec.answer_lengths.values() for length in lengths]
     print(f"answers:       {sum(answers) / len(answers):.1f} tokens on average (worked solutions)")
     print(f"{'phase':<15}{'seconds':>8}{'share':>7}  bound    slowest op class")
@@ -764,12 +772,18 @@ def cost_predict(
     if run.steps < run.budget_steps:
         line += f" (rl.max_steps: the FLOPs budget buys {run.budget_steps})"
     print(line)
-    sessions = run.seconds / (session_hours * 3600)
+    gradings = predict_gradings(config, run.steps, hardware, efficiencies)  # m4s3
+    print(f"gradings:      {len(gradings.steps)}, at steps {', '.join(map(str, gradings.steps))}")
+    print(
+        f"               greedy {gradings.greedy:.1f} s each, sampled {gradings.sampled:.1f} s "
+        f"at the first and last: {duration(gradings.seconds)}"
+    )
+    sessions = (run.seconds + gradings.seconds) / (session_hours * 3600)
     if sessions <= 1:
         fits = f"fits in one of {session_hours:g} h ({sessions:.1%} of it)"
     else:
         fits = f"needs {sessions:.1f} of {session_hours:g} h (it resumes from checkpoints)"
-    print(f"session:       {fits}; gradings and checkpoints come on top")
+    print(f"session:       {fits}; gradings included, checkpoints come on top")
     return 0
 
 

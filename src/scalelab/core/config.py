@@ -159,6 +159,9 @@ class RLConfig(StrictModel):
     lr: float = Field(default=1e-5, gt=0)  # constant: no warmup, no decay
     weight_decay: float = Field(default=0.0, ge=0)
     grad_clip: float = Field(default=1.0, gt=0)  # the largest gradient norm an update may use
+    # m4s3: gradings spaced evenly in log steps, on top of eval.every's: this many in every
+    # tenfold stretch of steps (1, 2, 3, 6, 10, 18, 32, ...: geometric_steps). 0: none.
+    gradings_per_decade: int = Field(default=4, ge=0)
 
 
 class ExperimentConfig(StrictModel):

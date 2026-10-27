@@ -224,7 +224,8 @@ def test_an_rl_run_starts_from_a_warm_start_and_records_every_grading(
     metrics = {"greedy_pass@1", "sampled_pass@1", "sampled_pass@4"}
     for step in range(steps + 1):
         at_step = [e for e in graded if e.step == step and e.task == "arithmetic-2"]
-        assert {e.metric for e in at_step} == metrics
+        sampled = step in (0, steps)  # m4s3: sampled answers at the first and last gradings
+        assert {e.metric for e in at_step} == (metrics if sampled else {"greedy_pass@1"})
         assert all(e.n == 5 for e in at_step)
 
 

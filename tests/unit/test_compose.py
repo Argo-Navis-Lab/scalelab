@@ -53,12 +53,12 @@ def test_the_warm_start_experiment_is_pinned():
 
 def test_the_rl_experiment_is_pinned():
     # Added in 'm2s18'. Changed on purpose in 'm2s24', when rl gained max_steps (it was
-    # a806caf7ff58c365).
+    # a806caf7ff58c365), and in 'm4s3', when it gained gradings_per_decade (47b519376e33a2b5).
     config = load_config(RL)
     assert config.algo is not None and config.rl is not None
     assert (config.model.name, config.algo.name) == ("m1", "grpo")
     assert config.rl.from_run == "c73d1d0f4e234964-s0-2aeaf16b"  # M1's exit warm start of m1
-    assert config_hash(config) == "47b519376e33a2b5"
+    assert config_hash(config) == "3c9c098bbaf0128d"
 
 
 @pytest.mark.parametrize("name", ["grpo", "dr_grpo", "rloo", "dapo"])

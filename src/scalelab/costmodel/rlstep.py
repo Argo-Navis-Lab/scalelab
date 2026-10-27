@@ -195,6 +195,40 @@ def optimizer_ops(model: ModelSpec, precision: Precision = "fp32") -> list[Op]:
     ]
 
 
+def generation_time(
+    model: ModelSpec,
+    rows: Sequence[int],
+    answer_lengths: Mapping[int, Sequence[int]],
+    batch_size: int,
+    hardware: HardwareSpec,
+    efficiencies: Mapping[Group, Efficiency] | None = None,
+    precision: Precision = "fp32",
+) -> PhaseTime:
+    """generate()'s expected time for rows with these prompt lengths, each answer one of the
+    lengths seen after prompts of its length: rows decode in decode_chunks' plan, and a chunk
+    keeps decoding until its longest answer is written (m4s3: moved out of predict_rl_step,
+    so gradings are priced the same way)."""
+    timed: dict[WorkloadSpec, Prediction] = {}
+    p = precision
+
+    def run(workload: WorkloadSpec) -> Prediction:  # each shape is timed once
+        if workload not in timed:
+            timed[workload] = time_ops(op_graph(model, workload), hardware, efficiencies)
+        return timed[workload]
+
+    generate = _Tally()
+    for chunk in decode_chunks(rows, batch_size):
+        n, prompt = len(chunk), rows[chunk[0]]
+        generate.add(run(WorkloadSpec(phase="prefill", batch=n, tokens=prompt, precision=p)))
+        chances = longest([answer_lengths[prompt]] * n)
+        running = 1.0  # the chance the longest answer is longer than j + 1 tokens
+        for j in range(max(chances) - 1):  # the last token is never fed back
+            running -= chances.get(j + 1, 0.0)
+            decode = WorkloadSpec(phase="decode", batch=n, past=prompt + j, tokens=1, precision=p)
+            generate.add(run(decode), running)
+    return generate.phase()
+
+
 def predict_rl_step(
     model: ModelSpec,
     step: RLStepSpec,
@@ -232,16 +266,9 @@ def predict_rl_step(
                     tally.add(run(workload), weight * chance)
 
     rows = step.rows
-    generate = _Tally()
-    for chunk in decode_chunks(rows, step.generation_batch):
-        n, prompt = len(chunk), rows[chunk[0]]
-        generate.add(run(WorkloadSpec(phase="prefill", batch=n, tokens=prompt, precision=p)))
-        chances = longest([step.answer_lengths[prompt]] * n)
-        running = 1.0  # the chance the longest answer is longer than j + 1 tokens
-        for j in range(max(chances) - 1):  # the last token is never fed back
-            running -= chances.get(j + 1, 0.0)
-            decode = WorkloadSpec(phase="decode", batch=n, past=prompt + j, tokens=1, precision=p)
-            generate.add(run(decode), running)
+    generate = generation_time(
+        model, rows, step.answer_lengths, step.generation_batch, hardware, efficiencies, p
+    )
 
     totals = [[length + n for n in step.answer_lengths[length]] for length in rows]
     if step.sort_rows:  # m3s15: the padding cut
@@ -259,7 +286,7 @@ def predict_rl_step(
     train.add(time_ops(optimizer_ops(model, p), hardware, efficiencies), step.epochs)
 
     phases: dict[Phase, PhaseTime] = {
-        "generate": generate.phase(),
+        "generate": generate,
         "logprobs": logprobs.phase(),
         "train": train.phase(),
     }

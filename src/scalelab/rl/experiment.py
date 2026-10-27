@@ -86,12 +86,41 @@ def grade_by_part(
     return results
 
 
+def geometric_steps(per_decade: int, last: int) -> list[int]:
+    """The steps 10^(i / per_decade) for i = 0, 1, 2, ..., rounded, each once, up to `last`
+    (m4s3): per_decade of them in every tenfold stretch of steps, evenly spaced in log steps,
+    where R(C), a logistic in log C, is fitted. None for per_decade 0."""
+    steps: list[int] = []
+    i = 0
+    while per_decade > 0 and (step := round(10 ** (i / per_decade))) <= last:
+        if not steps or step > steps[-1]:  # crowded at the start: 1.0, 1.3, 1.6, 2.0... once each
+            steps.append(step)
+        i += 1
+    return steps
+
+
+def graded(config: ExperimentConfig, step: int) -> bool:
+    """Whether an RL run is graded after `step`, besides step 0 and its last step (always
+    graded): every eval.every steps, and at the geometric steps of rl.gradings_per_decade."""
+    assert config.rl is not None  # only RL runs
+    every, per_decade = config.eval.every, config.rl.gradings_per_decade
+    return (every > 0 and step % every == 0) or step in geometric_steps(per_decade, step)
+
+
+def grading_steps(config: ExperimentConfig, last: int) -> list[int]:
+    """Every step an RL run that ends after step `last` is graded at, in order: 0 (the warm
+    start), the steps graded() picks, and the last."""
+    return [0, *(step for step in range(1, last) if graded(config, step)), last]
+
+
 def grade_rl(
-    model: Transformer, task: Task[Any], eval_sets: dict[str, list[Any]]
+    model: Transformer, task: Task[Any], eval_sets: dict[str, list[Any]], sample: bool = True
 ) -> tuple[list[EvalResult], list[SampledResult]]:
     """RL's grading: greedy pass@1 on each eval set (grade_by_part), and 4 sampled answers at
-    T 1 to each problem, split the same way. The samples come from a fresh generator seeded
-    with GRADING_SEED, never from training's."""
+    T 1 to each problem, split the same way (sample=False: none, m4s3). The samples come from
+    a fresh generator seeded with GRADING_SEED, never from training's."""
+    if not sample:
+        return grade_by_part(model, task, eval_sets), []
     generator = torch.Generator(model.embed.weight.device).manual_seed(GRADING_SEED)
     sampled: list[SampledResult] = []
     for name, problems in eval_sets.items():
@@ -181,8 +210,9 @@ def run_rl_experiment(
 
     The seed's "data" stream picks the problems and its "sampling" stream the answers. With
     a `report`, the model is graded before the first step (step 0: the warm start's own
-    grade, R_0), every config.eval.every steps and after the last one. Grading changes
-    nothing about training, and its FLOPs aren't part of the budget. With a `sink`, every
+    grade, R_0), after each step graded() picks, and after the last one; m4s3: sampled
+    answers only at step 0 and the last. Grading changes nothing about training, and its
+    FLOPs aren't part of the budget. With a `sink`, every
     collector measures every step and records it there (telemetry), and the online
     detectors judge what they measured: each event goes to `on_anomaly`. `on_step`, if
     given, is called with each step's metrics before that step is graded. `padding_cut`:
@@ -213,12 +243,11 @@ def run_rl_experiment(
     def grade(metrics: RLStepMetrics | None) -> None:
         if report is None:
             return
-        if metrics is not None:  # step 0 is always graded; later steps when due, and the last
-            last = budget_spent(rl, metrics.step, metrics.flops)
-            due = config.eval.every > 0 and metrics.step % config.eval.every == 0
-            if not (last or due):
-                return
-        report(metrics, *grade_rl(model, task, eval_sets))
+        last = metrics is not None and budget_spent(rl, metrics.step, metrics.flops)
+        if metrics is not None and not (last or graded(config, metrics.step)):
+            return  # step 0 is always graded; later steps when graded() says so, and the last
+        # m4s3: sampled answers only at the ends, step 0 and the last (4/5 of a grading's cost)
+        report(metrics, *grade_rl(model, task, eval_sets, sample=metrics is None or last))
 
     def after_step(metrics: RLStepMetrics) -> None:
         if on_step is not None:

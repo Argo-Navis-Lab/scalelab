@@ -63,7 +63,8 @@ def run(home: Path, folder: str, seed: int = 0) -> tuple[list[RLStepMetrics], li
 def test_gradings_come_at_step_0_every_so_often_and_at_the_end(tmp_path: Path):
     metrics, gradings = run(tmp_path, "a")
     last = len(metrics)
-    expected = [0] + [step for step in range(1, last + 1) if step % 2 == 0 or step == last]
+    geometric = [1, 2, 3, 6, 10]  # m4s3: rl.gradings_per_decade 4
+    expected = [0] + [s for s in range(1, last + 1) if s % 2 == 0 or s in geometric or s == last]
     assert [step for step, _, _ in gradings] == expected
 
 
@@ -76,6 +77,12 @@ def test_each_grading_is_greedy_and_sampled_by_operation(tmp_path: Path):
     assert [(r.name, r.n, r.samples) for r in sampled] == [
         (name, n, 4) for name, n in zip(names, [10, 3, 5, 2], strict=True)
     ]
+
+
+def test_only_the_first_and_last_gradings_sample(tmp_path: Path):
+    _, gradings = run(tmp_path, "a")  # m4s3: sampled answers cost 4/5 of a grading
+    assert all(greedy for _, greedy, _ in gradings)
+    assert [step for step, _, sampled in gradings if sampled] == [0, gradings[-1][0]]
 
 
 def test_grading_changes_nothing_about_rl(tmp_path: Path):
@@ -112,7 +119,8 @@ def test_a_warm_start_experiment_is_not_run_as_rl(tmp_path: Path):
 
 
 def test_a_step_limit_ends_the_run_with_its_last_grading(tmp_path: Path):
-    limited = load_config(EXPERIMENTS / "rl.yaml", [*SMALL, "rl.flops=1e15", "rl.max_steps=3"])
+    overrides = ["rl.flops=1e15", "rl.max_steps=3", "rl.gradings_per_decade=0"]  # m4s3: none
+    limited = load_config(EXPERIMENTS / "rl.yaml", [*SMALL, *overrides])
     gradings: list[int] = []
 
     def report(
@@ -124,4 +132,4 @@ def test_a_step_limit_ends_the_run_with_its_last_grading(tmp_path: Path):
         limited, 0, warm_start(limited.model), tmp_path / "a", tmp_path, report=report
     )
     assert len(metrics) == 3
-    assert gradings == [0, 2, 3]  # eval.every 2, and the last step
+    assert gradings == [0, 2, 3]  # eval.every 2 (no geometric steps), and the last step

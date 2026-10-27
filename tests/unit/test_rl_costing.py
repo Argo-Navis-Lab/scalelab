@@ -1,24 +1,31 @@
 """An RL experiment's step and whole run, as the cost model sees them (m3s9)."""
 
+from inspect import signature
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from scalelab.core.config import ExperimentConfig, RuntimeConfig, load_config
-from scalelab.costmodel.rlstep import predict_warm_start_step
+from scalelab.costmodel.rlstep import generation_time, predict_rl_step, predict_warm_start_step
 from scalelab.costmodel.specs import CPU, HARDWARE, ModelSpec
 from scalelab.rl.costing import (
     ANSWER_SAMPLES,
+    GRADING_SAMPLES,
+    GREEDY_BATCH,
+    SAMPLED_BATCH,
     padding_cut,
+    predict_gradings,
     predict_rl_run,
     predict_run_step,
     predict_step,
     rl_step_spec,
     warm_start_step_spec,
 )
-from scalelab.rl.experiment import make_task
+from scalelab.rl.evaluation import evaluate_sampled, generate_greedy
+from scalelab.rl.experiment import load_eval_sets, make_task
 from scalelab.rl.loop import GENERATION_BATCH, sample_problems
+from scalelab.rl.rollout import generate
 from scalelab.rl.warmstart import sample_examples
 from scalelab.tasks.tokenizer import encode
 
@@ -134,3 +141,42 @@ def test_a_run_is_predicted_in_its_precision_and_with_its_cut() -> None:
         assert both == padding_cut(config, t4, precision="fp16")
         assert both.seconds < cut.seconds  # the cut in fp16 is still fp16...
         assert both.seconds < fp16.seconds  # ...and still cut
+
+
+# --- added in m4s3: gradings priced ---------------------------------------------------------
+
+
+def test_gradings_are_priced_with_the_batches_and_samples_they_use() -> None:
+    assert signature(generate_greedy).parameters["batch_size"].default == GREEDY_BATCH
+    assert signature(generate).parameters["batch_size"].default == SAMPLED_BATCH
+    assert signature(evaluate_sampled).parameters["samples"].default == GRADING_SAMPLES
+
+
+def test_a_step_prices_its_generation_as_generation_time_does() -> None:
+    config = rl_config()
+    spec = rl_step_spec(config)
+    model = ModelSpec.from_config(config.model)
+    alone = generation_time(model, spec.rows, spec.answer_lengths, GENERATION_BATCH, CPU)
+    assert predict_rl_step(model, spec, CPU).phases["generate"] == alone
+
+
+def test_greedy_answers_are_one_a_problem_as_long_as_its_worked_solution() -> None:
+    config = rl_config("eval.problems=200")
+    task, problem_type = make_task(config.task.name, config.task.ops)
+    (problems,) = load_eval_sets(task, problem_type, [2], 200).values()
+    lengths = [len(encode(task.worked_solution(problem))) + 1 for problem in problems]
+    model = ModelSpec.from_config(config.model)
+    greedy = generation_time(model, [7] * 200, {7: lengths}, GREEDY_BATCH, CPU)
+    sampled = generation_time(model, [7] * 800, {7: lengths}, SAMPLED_BATCH, CPU)
+    run = predict_gradings(config, 1, CPU)
+    assert run.greedy == pytest.approx(greedy.seconds, rel=1e-12)
+    assert run.sampled == pytest.approx(sampled.seconds, rel=1e-12)
+
+
+def test_a_run_grades_greedy_at_every_grading_and_samples_at_the_ends() -> None:
+    run = predict_gradings(rl_config("eval.every=0"), 100, CPU)
+    assert run.steps == (0, 1, 2, 3, 6, 10, 18, 32, 56, 100)
+    assert run.seconds == pytest.approx(10 * run.greedy + 2 * run.sampled, rel=1e-12)
+    assert 0 < run.greedy < run.sampled  # 4 answers to a problem cost more than 1
+    with pytest.raises(ValueError, match="is a warm start"):
+        predict_gradings(load_config(EXPERIMENTS / "warmstart.yaml", []), 100, CPU)

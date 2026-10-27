@@ -39,7 +39,8 @@ def test_twenty_rl_steps_of_m1(
     (rl,) = [run for run in registry.list_runs() if run.run_id != warm_start.run_id]
     assert rl.status == "done"
     graded = registry.list_evals(rl.run_id)
-    assert {e.step for e in graded} == {0, 20}  # the warm start, and the last step
+    # the warm start, the geometric steps of rl.gradings_per_decade 4 (m4s3), and the last step
+    assert {e.step for e in graded} == {0, 1, 2, 3, 6, 10, 18, 20}
     assert {e.task for e in graded if "/" not in e.task} == {f"arithmetic-{d}" for d in range(2, 6)}
     assert all(math.isfinite(e.value) and 0 <= e.value <= 1 for e in graded)
     latest = latest_checkpoint(tmp_path / "checkpoints" / rl.run_id)

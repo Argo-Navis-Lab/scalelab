@@ -14,13 +14,14 @@ from scalelab.costmodel.rlstep import (
     RLStepSpec,
     StepPrediction,
     WarmStartStepSpec,
+    generation_time,
     predict_rl_step,
     predict_warm_start_step,
 )
 from scalelab.costmodel.roofline import Efficiency, Group
 from scalelab.costmodel.specs import HardwareSpec, ModelSpec, Precision
 from scalelab.costmodel.validate import PARTS
-from scalelab.rl.experiment import make_task
+from scalelab.rl.experiment import grading_steps, load_eval_sets, make_task
 from scalelab.rl.loop import GENERATION_BATCH, sample_problems
 from scalelab.rl.warmstart import WARM_START_PIECES, sample_examples
 from scalelab.tasks.tokenizer import encode
@@ -172,3 +173,57 @@ def predict_run_step(
     if runtime.padding_cut:
         return padding_cut(config, hardware, efficiencies, precision=runtime.precision)
     return predict_step(config, hardware, efficiencies, runtime.precision)
+
+
+# m4s3: how gradings generate, as the cost model prices them (a test checks each against the
+# default it copies: generate_greedy's batch_size, rollout.generate's, evaluate_sampled's samples)
+GREEDY_BATCH = 128
+SAMPLED_BATCH = 512
+GRADING_SAMPLES = 4
+
+
+class GradingPrediction(StrictModel):
+    """An RL run's gradings on one device (m4s3), in fp32 as gradings always run (m3s22): greedy
+    answers to every eval problem at each graded step, and GRADING_SAMPLES sampled answers to
+    each at the first and the last only."""
+
+    steps: tuple[int, ...]  # the steps graded, 0 and the last included
+    greedy: float  # seconds: one grading's greedy answers
+    sampled: float  # seconds: one grading's sampled answers
+
+    @property
+    def seconds(self) -> float:
+        """All of them: greedy answers at every grading, sampled ones at the first and last."""
+        return self.greedy * len(self.steps) + self.sampled * 2
+
+
+def predict_gradings(
+    config: ExperimentConfig,
+    steps: int,
+    hardware: HardwareSpec,
+    efficiencies: Mapping[Group, Efficiency] | None = None,
+) -> GradingPrediction:
+    """How long an RL run of `steps` steps spends grading on `hardware`. Each eval set is
+    answered on its own, as grade_rl answers them, and its answers are its problems' own worked
+    solutions (as rl_step_spec's are the training problems')."""
+    if config.rl is None:
+        raise ValueError(f"{config.name} is a warm start: only RL runs are priced gradings")
+    task, problem_type = make_task(config.task.name, config.task.ops)
+    eval_sets = load_eval_sets(task, problem_type, config.task.difficulties, config.eval.problems)
+    model = ModelSpec.from_config(config.model)
+    greedy = sampled = 0.0
+    for problems in eval_sets.values():
+        prompts = [len(task.format_prompt(problem)) for problem in problems]
+        answers: dict[int, list[int]] = defaultdict(list)  # prompt length -> its answers' lengths
+        for prompt, problem in zip(prompts, problems, strict=True):
+            answers[prompt].append(len(encode(task.worked_solution(problem))) + 1)  # then <eos>
+        rows = [prompt for prompt in prompts for _ in range(GRADING_SAMPLES)]  # group by group
+        greedy += generation_time(
+            model, prompts, answers, GREEDY_BATCH, hardware, efficiencies
+        ).seconds
+        sampled += generation_time(
+            model, rows, answers, SAMPLED_BATCH, hardware, efficiencies
+        ).seconds
+    return GradingPrediction(
+        steps=tuple(grading_steps(config, steps)), greedy=greedy, sampled=sampled
+    )

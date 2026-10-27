@@ -14,7 +14,7 @@ from scalelab.costmodel.report import DecisionReport
 from scalelab.costmodel.roofline import Efficiency, Group
 from scalelab.costmodel.specs import CPU
 from scalelab.costmodel.validate import Validation
-from scalelab.rl.costing import padding_cut, predict_rl_run, predict_step
+from scalelab.rl.costing import padding_cut, predict_gradings, predict_rl_run, predict_step
 
 REPO = Path(__file__).resolve().parents[2]
 RL = REPO / "configs" / "experiments" / "rl.yaml"
@@ -57,6 +57,7 @@ def test_predict_without_a_calibration_uses_the_datasheet(
     assert f"{'step':<15}{run.step.seconds:8.3f}" in out
     assert "run:           10 steps, " in out
     assert f"(rl.max_steps: the FLOPs budget buys {run.budget_steps})\n" in out
+    assert "gradings:      6, at steps 0, 1, 2, 3, 6, 10\n" in out  # m4s3
     assert "session:       fits in one of 12 h" in out
 
 
@@ -80,7 +81,8 @@ def test_predict_uses_the_calibration_and_says_when_it_is_stale(
     assert f"calibration:   {path}\n" in out
     assert "warning:       calibration.json was fitted on torch 0.0.1, this is " in out
     assert f"{'step':<15}{run.step.seconds:8.3f}" in out
-    assert f"session:       needs {run.seconds / 3.6:.1f} of 0.001 h" in out
+    gradings = predict_gradings(load_config(RL, SMALL), run.steps, CPU, efficiencies)  # m4s3
+    assert f"session:       needs {(run.seconds + gradings.seconds) / 3.6:.1f} of 0.001 h" in out
 
 
 def test_a_warm_start_has_nothing_to_predict(

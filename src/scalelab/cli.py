@@ -14,7 +14,7 @@ import warnings
 from collections import Counter
 from collections.abc import Generator, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple, get_args
 
 import torch
 import yaml
@@ -48,6 +48,8 @@ from scalelab.core.envcapture import EnvInfo, capture_env
 from scalelab.core.registry import (
     AnomalyRecord,
     EvalRecord,
+    Job,
+    JobState,
     OutdatedRegistryError,
     Registry,
     RunRecord,
@@ -58,7 +60,7 @@ from scalelab.core.storage import (
     registry_path,
     scalelab_home,
 )
-from scalelab.core.sweep import expand, load_sweep
+from scalelab.core.sweep import Sweep, expand, load_sweep
 from scalelab.costmodel.calibrate import calibrate, env_versions, load_calibration, save_calibration
 from scalelab.costmodel.comms import COLLECTIVES, collective_time, fit_link
 from scalelab.costmodel.memory import RESERVED_FRACTION
@@ -278,6 +280,25 @@ def registry_copy(home: Path) -> Generator[Registry]:
         except OutdatedRegistryError as err:
             raise UsageError(str(err)) from None
         yield registry
+
+
+@contextlib.contextmanager
+def registry_edit(home: Path) -> Generator[Registry]:
+    """<home>'s registry, for a command that changes it (m4s5): changed in a private copy, then
+    put back in one atomic write, so SQLite never opens the file at home (on Colab, on Google
+    Drive). Nothing is put back if the `with` block fails. One writer at a time."""
+    source = registry_path(home)
+    with tempfile.TemporaryDirectory() as folder:
+        copy = Path(folder) / "registry.db"
+        if source.is_file():
+            shutil.copyfile(source, copy)
+        try:
+            registry = Registry.sqlite(copy)
+        except OutdatedRegistryError as err:
+            raise UsageError(str(err)) from None
+        yield registry
+        registry.engine.dispose()
+        atomic_write_bytes(source, copy.read_bytes())
 
 
 def run(experiment: Path, overrides: Sequence[str]) -> int:
@@ -795,12 +816,24 @@ def cost_predict(
 SESSION_MARGIN = 1.35
 
 
-def sweep_plan(path: Path, hardware_name: str, session_hours: float) -> int:
+class PlannedJob(NamedTuple):
+    """One job of a sweep as sweep plan resolved and priced it (m4s5: what submit records)."""
+
+    overrides: tuple[str, ...]
+    config: ExperimentConfig
+    seed: int
+    seconds: float
+
+
+def sweep_plan(
+    path: Path, hardware_name: str, session_hours: float
+) -> tuple[Sweep, list[PlannedJob], int]:
     """`scalelab sweep plan` (m4s4): every job a sweep file asks for, in order, each priced by
     the cost model on this hardware: its steps, hours and memory, and the sessions it needs at
     SESSION_MARGIN times its predicted hours. Checks that every job's config composes and that
-    no two jobs are the same run. Runs nothing, records nothing. Exit 1 if a job needs more
-    memory than the device has."""
+    no two jobs are the same run. Runs nothing, records nothing. Returns the sweep, its jobs
+    (m4s5: for sweep submit) and the exit code: 1 if a job needs more memory than the device
+    has."""
     try:
         sweep = load_sweep(path)
     except (ValueError, OSError) as err:  # pydantic's ValidationError is a ValueError
@@ -815,6 +848,7 @@ def sweep_plan(path: Path, hardware_name: str, session_hours: float) -> int:
     total = 0.0
     sessions: list[int] = []  # each job's, at SESSION_MARGIN
     too_big: list[int] = []  # the numbers of the jobs that need more memory than there is
+    planned: list[PlannedJob] = []  # m4s5
     print(f"job  {'config':<18}seed  runtime     steps  s/step  hours   GiB  sessions")
     for number, overrides in enumerate(jobs, start=1):
         try:
@@ -828,6 +862,7 @@ def sweep_plan(path: Path, hardware_name: str, session_hours: float) -> int:
             )
         seen[run] = number
         job = predict_job(config, runtime, hardware, efficiencies)
+        planned.append(PlannedJob(overrides, config, seed, job.seconds))
         total += job.seconds
         sessions.append(math.ceil(job.seconds * SESSION_MARGIN / (session_hours * 3600)))
         if job.memory > usable:
@@ -857,8 +892,55 @@ def sweep_plan(path: Path, hardware_name: str, session_hours: float) -> int:
             f"memory:        {jobs_text}{', '.join(map(str, too_big))} {verb} more than the "
             f"{usable / 2**30:.1f} GiB usable"
         )
-        return 1
+        return sweep, planned, 1
     print(f"memory:        every job fits in the {usable / 2**30:.1f} GiB usable")
+    return sweep, planned, 0
+
+
+def sweep_submit(path: Path, hardware_name: str, session_hours: float) -> int:
+    """`scalelab sweep submit` (m4s5): sweep plan, then, if every job fits the device, the sweep
+    and its jobs into <home>'s registry, in plan's order, each with its predicted seconds, queued
+    for `scalelab worker`. A job whose run is already done is recorded done. A sweep is
+    submitted once at a commit. Refuses uncommitted changes: every job runs at this commit, and
+    its run id names it."""
+    env = capture_env()
+    if env.git.dirty:
+        raise UsageError(
+            "commit your changes first: a sweep's jobs run at the commit it was submitted at"
+        )
+    sweep, planned, code = sweep_plan(path, hardware_name, session_hours)
+    if code != 0:
+        print("submitted:     nothing")
+        return code
+    sweep_id = f"{sweep.name}-{env.git.sha[:8]}"
+    home = scalelab_home()
+    with registry_edit(home) as registry:
+        if registry.get_sweep(sweep_id) is None:
+            done = {run.run_id for run in registry.list_runs() if run.status == "done"}
+            new_jobs: list[Job] = []
+            for number, job in enumerate(planned, start=1):
+                run_id = hashing.run_id(job.config, job.seed, env.git.sha)
+                new_jobs.append(
+                    Job(
+                        job_id=f"{sweep_id}-{number}",
+                        sweep_id=sweep_id,
+                        number=number,
+                        run_id=run_id,
+                        experiment=str(sweep.experiment),
+                        overrides=job.overrides,
+                        hardware=hardware_name,
+                        seconds=job.seconds,
+                        state="done" if run_id in done else "queued",
+                    )
+                )
+            registry.enqueue(sweep_id, sweep.model_dump_json(), env.git.sha, new_jobs)
+            print(f"submitted:     sweep {sweep_id}, {len(new_jobs)} jobs")
+        else:
+            print(f"submitted:     already (sweep {sweep_id}): nothing added")
+        states = Counter(job.state for job in registry.list_jobs(sweep_id))
+    counts = [f"{states[state]} {state}" for state in get_args(JobState) if states[state]]
+    print(f"jobs:          {', '.join(counts)}")
+    print(f"registry:      {registry_path(home)}")
     return 0
 
 
@@ -1322,22 +1404,25 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     sweep_parser = commands.add_parser("sweep", help="many runs of one experiment")
     sweep_commands = sweep_parser.add_subparsers(dest="sweep_command", required=True)
-    plan_parser = sweep_commands.add_parser(
-        "plan", help="list a sweep's jobs and price each one; runs and records nothing"
-    )
-    plan_parser.add_argument("sweep", type=Path, help="e.g. configs/sweeps/warmstarts.yaml")
-    plan_parser.add_argument(
-        "--hardware",
-        required=True,
-        choices=["cpu", *HARDWARE],
-        help="the device the jobs will run on: its calibration.json, when it has one",
-    )
-    plan_parser.add_argument(
-        "--session-hours",
-        type=float,
-        default=12.0,
-        help="how long a session lasts (default 12: Colab's free tier)",
-    )
+    sweep_help = {
+        "plan": "list a sweep's jobs and price each one; runs and records nothing",
+        "submit": "sweep plan, then record the sweep and queue its jobs for scalelab worker",
+    }
+    for name, text in sweep_help.items():  # m4s5: submit takes plan's arguments
+        sweep_command = sweep_commands.add_parser(name, help=text)
+        sweep_command.add_argument("sweep", type=Path, help="e.g. configs/sweeps/warmstarts.yaml")
+        sweep_command.add_argument(
+            "--hardware",
+            required=True,
+            choices=["cpu", *HARDWARE],
+            help="the device the jobs will run on: its calibration.json, when it has one",
+        )
+        sweep_command.add_argument(
+            "--session-hours",
+            type=float,
+            default=12.0,
+            help="how long a session lasts (default 12: Colab's free tier)",
+        )
 
     args = parser.parse_args(argv)
     try:
@@ -1370,8 +1455,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.command == "cost" and args.cost_command == "comms":
             return cost_comms(args.world, args.backend)
+        if args.command == "sweep" and args.sweep_command == "submit":
+            return sweep_submit(args.sweep, args.hardware, args.session_hours)
         if args.command == "sweep":
-            return sweep_plan(args.sweep, args.hardware, args.session_hours)
+            return sweep_plan(args.sweep, args.hardware, args.session_hours)[2]
         if args.command == "cost":
             return cost_predict(args.experiment, args.overrides, args.hardware, args.session_hours)
         return run(args.experiment, args.overrides)

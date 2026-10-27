@@ -57,7 +57,7 @@ def test_creates_file_and_tables(tmp_path):
     path = tmp_path / "sub" / "registry.db"  # the folder doesn't exist yet either
     registry = Registry.sqlite(path)
     assert path.is_file()
-    tables = ["anomalies", "evals", "experiments", "runs", "runtimes"]
+    tables = ["anomalies", "evals", "experiments", "jobs", "runs", "runtimes", "sweeps"]
     assert sorted(inspect(registry.engine).get_table_names()) == tables
 
 

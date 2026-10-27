@@ -54,7 +54,7 @@ def test_a_sweep_file_is_yaml(tmp_path: Path) -> None:
 
 
 def test_the_warm_starts_follow_the_m4_plan() -> None:
-    # fp16 everywhere, the padding cut from m3 up (m4s2 judged), seed 0 only
+    # fp16 everywhere, the padding cut from m3 up (m4s2 judged), seed 0 only, 20M tokens (m4s7)
     jobs = [split_overrides(job) for job in expand(load_sweep(SWEEPS / "warmstarts.yaml"))]
     models = [
         next(text for text in overrides if text.startswith("model=")) for *_, overrides in jobs
@@ -63,3 +63,4 @@ def test_the_warm_starts_follow_the_m4_plan() -> None:
     assert [seed for seed, _, _ in jobs] == [0] * 5
     assert [runtime.get("precision") for _, runtime, _ in jobs] == ["fp16"] * 5
     assert [runtime.get("padding_cut", False) for _, runtime, _ in jobs] == [False] * 2 + [True] * 3
+    assert all("warm_start.tokens=20000000" in overrides for *_, overrides in jobs)

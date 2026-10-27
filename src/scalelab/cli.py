@@ -21,6 +21,7 @@ from typing import Any, NamedTuple, get_args
 import torch
 import yaml
 
+from scalelab.analysis.bands import CEILING, FLOOR, pick_bands
 from scalelab.analysis.costreport import load_measurements, write_report
 from scalelab.analysis.reports import gains
 from scalelab.analysis.stats import Interval
@@ -97,11 +98,12 @@ from scalelab.rl.costing import (
     predict_run_step,
     predict_step,
 )
-from scalelab.rl.evaluation import EvalResult, SampledResult
+from scalelab.rl.evaluation import EvalResult, SampledResult, evaluate
 from scalelab.rl.experiment import (
     grade_by_part,
     load_eval_sets,
     make_task,
+    operation,
     run_experiment,
     run_rl_experiment,
 )
@@ -111,6 +113,7 @@ from scalelab.rl.loop import SNAPSHOTS, RLStepMetrics
 from scalelab.rl.measure import measure_change
 from scalelab.rl.overhead import OVERHEAD_BUDGET, measure_overhead
 from scalelab.rl.warmstart_loop import StepMetrics
+from scalelab.tasks.arithmetic import ArithmeticProblem
 from scalelab.telemetry.anomalies import AnomalyEvent, RunHalted
 from scalelab.telemetry.detectors import REGRESSION_STEPS, ThroughputDetector, regression_limit
 from scalelab.telemetry.sink import MetricsSink, metrics_folder, read_metrics
@@ -551,6 +554,59 @@ def grade(run_id: str, problems: int) -> int:
     for result in grade_by_part(finished.model.to(device), task, eval_sets):
         rate = f"{result.pass_rate:6.1%} ± {result.stderr:.1%}"
         print(f"{result.name:<15}{rate}  ({result.passed} of {result.n})")
+    return 0
+
+
+def bands(run_ids: Sequence[str], problems: int) -> int:
+    """`scalelab bands` (m4s7): finished warm starts' greedy pass@1 on the multiplications
+    of each band's eval set, smallest model first, and the bands the M4 RL task keeps by the
+    rule the M4 plan fixed (analysis/bands.py). Prints them, records nothing."""
+    if len(run_ids) < 2 or len(set(run_ids)) < len(run_ids):
+        raise UsageError(
+            "give two or more different runs: the rule compares the smallest model with the largest"
+        )
+    if problems < 1:
+        raise UsageError(f"--problems must be at least 1, got {problems}")
+    home = scalelab_home()
+    with registry_copy(home) as registry:
+        try:
+            runs = [(run_id, load_finished_run(registry, home, run_id)) for run_id in run_ids]
+        except ValueError as err:
+            raise UsageError(str(err)) from None
+    difficulties = runs[0][1].task.difficulties
+    if any(
+        run.task.name != "arithmetic" or run.task.difficulties != difficulties for _, run in runs
+    ):
+        raise UsageError("the runs must all be trained on arithmetic at the same difficulties")
+    runs.sort(key=lambda pair: sum(p.numel() for p in pair[1].model.parameters()))  # smallest first
+
+    task, _ = make_task("arithmetic")
+    eval_sets = load_eval_sets(task, ArithmeticProblem, difficulties, problems)
+    times = {  # each band's multiplications: the RL task's operation
+        band: [problem for problem in eval_set if operation(problem) == "*"]
+        for band, eval_set in zip(difficulties, eval_sets.values(), strict=True)
+    }
+    if not all(times.values()):
+        raise UsageError(f"the first {problems} problems of a band hold no *: grade more of them")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    counts = ", ".join(str(len(items)) for items in times.values())
+    print(f"graded:        greedy pass@1 on each band's * problems ({counts} of them)")
+    print(f"{'model':<6}" + "".join(f"{f'band {band}':>9}" for band in times) + "  run")
+    rates: list[dict[int, float]] = []
+    for run_id, run in runs:
+        model = run.model.to(device)
+        rates.append(
+            {
+                band: evaluate(model, task, items, f"{task.name}-{band}/*").pass_rate
+                for band, items in times.items()
+            }
+        )
+        cells = "".join(f"{rate:9.1%}" for rate in rates[-1].values())
+        print(f"{run.model.config.name:<6}{cells}  {run_id}")
+    smallest, largest = runs[0][1].model.config.name, runs[-1][1].model.config.name
+    print(f"rule:          {smallest} at least {FLOOR:.0%} and {largest} at most {CEILING:.0%}")
+    kept = pick_bands(rates[0], rates[-1])
+    print(f"bands:         {', '.join(str(band) for band in kept) if kept else 'none'}")
     return 0
 
 
@@ -1349,6 +1405,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     grade_parser.add_argument(
         "--problems", type=int, default=1000, help="the first N of each eval set (default 1000)"
     )
+    bands_parser = commands.add_parser(
+        "bands", help="warm starts graded on * band by band, and the bands M4's RL task keeps"
+    )
+    bands_parser.add_argument("run_ids", nargs="+", help="two or more finished warm starts")
+    bands_parser.add_argument(
+        "--problems", type=int, default=1000, help="the first N of each eval set (default 1000)"
+    )
     overhead_parser = commands.add_parser(
         "overhead", help="time an RL experiment's steps without and with telemetry"
     )
@@ -1544,6 +1607,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "grade":
             return grade(args.run_id, args.problems)
+        if args.command == "bands":
+            return bands(args.run_ids, args.problems)
         if args.command == "overhead":
             return overhead(args.experiment, args.overrides, args.steps, args.warmup)
         if args.command == "report" and args.report == "cost":

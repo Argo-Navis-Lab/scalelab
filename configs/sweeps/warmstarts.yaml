@@ -1,9 +1,12 @@
-# m4s4: M4's warm starts (the M4 plan, step 7): 100 million tokens on every arithmetic band
-# for m1-m5, seed 0, on the T4 in fp16, the padding cut from m3 up (m4s2 judged: it slows m2).
+# m4s4: M4's warm starts (the M4 plan, step 7) on every arithmetic band for m1-m5, seed 0, on
+# the T4 in fp16, the padding cut from m3 up (m4s2 judged: it slows m2). m4s7: 20 million
+# tokens, M1's exit budget. 100 million (sweep warmstarts-ae08370d) left RL no room: m5 solved
+# at least 66% of the * problems of every band, above the task rule's 50% ceiling.
 name: warmstarts
 experiment: configs/experiments/warmstart.yaml
 overrides:
   - runtime.precision=fp16
+  - warm_start.tokens=20000000
 axes:
   model:
     - model=ladder_s/m1

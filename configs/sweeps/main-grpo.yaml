@@ -1,0 +1,27 @@
+# m4s10: the main sweep's grpo runs (the M4 plan, step 11): m1-m5, seeds 0-4, each from its
+# size's 20M-token warm start (sweep warmstarts-c67025d8), on the M4 task (m4s7: * at bands 4
+# and 5), on the T4 in fp16, the padding cut from m2 up. One file per algorithm (main-rloo and
+# main-dapo are this one with another algo), so the plan's cut order is what gets submitted:
+# rloo/dapo to 3 seeds (seeds go outermost: stop after seed 2), then no dapo. Every algorithm
+# gets the same FLOPs a size: S = 1000 GRPO steps (m4s9 judged) as A counts them, to the fewest
+# figures that still buy 1000 (sweep plan: grpo 1000 steps; rloo and dapo, with no reference
+# pass, ~1207). The m2/m4 runs are the seed study's (seeds.yaml): at the same commit, done.
+name: main-grpo
+experiment: configs/experiments/rl.yaml
+overrides:
+  - algo=grpo
+  - runtime.precision=fp16
+  - task.ops=*
+  - task.difficulties=[4, 5]
+axes:
+  model:
+    - [model=ladder_s/m1, rl.from_run=f6fb61a313ad22ca-s0-c67025d8, rl.flops=1.314e+15]
+    - [model=ladder_s/m2, rl.from_run=b023b181cb39cde0-s0-c67025d8, rl.flops=7.33e+15,
+       runtime.padding_cut=true]
+    - [model=ladder_s/m3, rl.from_run=ba04223d86290fc4-s0-c67025d8, rl.flops=2.104e+16,
+       runtime.padding_cut=true]
+    - [model=ladder_s/m4, rl.from_run=cd737287a76aac93-s0-c67025d8, rl.flops=4.64e+16,
+       runtime.padding_cut=true]
+    - [model=ladder_s/m5, rl.from_run=4f906a6e9de0eac6-s0-c67025d8, rl.flops=8.66e+16,
+       runtime.padding_cut=true]
+seeds: [0, 1, 2, 3, 4]

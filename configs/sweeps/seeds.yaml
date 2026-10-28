@@ -1,0 +1,18 @@
+# m4s10: the seed study (the M4 plan, DECIDED 8): GRPO at m2 and m4, seeds 0-9, each from its
+# size's 20M-token warm start (sweep warmstarts-c67025d8), on the M4 task (m4s7: * at bands 4
+# and 5), on the T4 in fp16 with the padding cut. The budget is M4's: S = 1000 GRPO steps
+# (m4s9 judged), as A counts them (main.yaml says how). These ARE main.yaml's grpo m2/m4 runs:
+# submitted at the same commit, seeds 0-4 count there as already done.
+name: seeds
+experiment: configs/experiments/rl.yaml
+overrides:
+  - algo=grpo
+  - runtime.precision=fp16
+  - runtime.padding_cut=true
+  - task.ops=*
+  - task.difficulties=[4, 5]
+axes:
+  model:
+    - [model=ladder_s/m2, rl.from_run=b023b181cb39cde0-s0-c67025d8, rl.flops=7.33e+15]
+    - [model=ladder_s/m4, rl.from_run=cd737287a76aac93-s0-c67025d8, rl.flops=4.64e+16]
+seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]

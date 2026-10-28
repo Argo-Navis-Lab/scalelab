@@ -1,7 +1,9 @@
-"""The statistics every report uses: interquartile means and bootstrap confidence intervals
-over seeds and eval problems."""
+"""The statistics every report uses: interquartile means, bootstrap confidence intervals
+over seeds and eval problems, and the power of a comparison across seeds."""
 
+import math
 from dataclasses import dataclass
+from statistics import NormalDist
 from typing import Literal
 
 import numpy as np
@@ -11,6 +13,10 @@ RESAMPLES = 10_000
 CONFIDENCE = 0.95
 BOOTSTRAP_SEED = 0  # fixed: the same values always give the same interval
 CHUNK = 1_000  # resamples drawn at once: memory ~ CHUNK x seeds x problems x 8 bytes
+ALPHA = 0.05  # m4s10: a comparison's level, two-sided
+POWER = 0.8  # the chance a comparison should have of seeing a real difference
+EFFECT = 0.03  # the difference in final R worth seeing between algorithms (the M4 plan)
+SEEDS = 5  # seeds a side in M4's comparisons, unless the seed study says 5 can't see EFFECT
 
 Statistic = Literal["mean", "iqm"]
 
@@ -89,3 +95,25 @@ def bootstrap_interval(
     low, high = np.quantile(np.concatenate(results), [tail, 1 - tail])
     estimate = _statistic(array.mean(axis=1), statistic)
     return Interval(estimate=float(estimate), low=float(low), high=float(high))
+
+
+def detection_power(effect: float, sd: float, seeds: int, alpha: float = ALPHA) -> float:
+    """The chance that a two-sided test at level `alpha` tells two variants apart when their
+    means differ by `effect`, with `seeds` values a side, each side spread by `sd`: the normal
+    approximation, unpaired (pairing by seed only helps), the far tail's sliver left out."""
+    if effect <= 0 or sd < 0 or seeds < 1 or not 0 < alpha < 1:
+        raise ValueError("power needs effect > 0, sd >= 0, seeds >= 1 and 0 < alpha < 1")
+    if sd == 0:
+        return 1.0  # no spread: any difference shows
+    critical = NormalDist().inv_cdf(1 - alpha / 2)
+    return NormalDist().cdf(effect / (sd * math.sqrt(2 / seeds)) - critical)
+
+
+def seeds_for_power(effect: float, sd: float, power: float = POWER, alpha: float = ALPHA) -> int:
+    """The fewest seeds a side that give a comparison `power` against `effect` (at least 2: a
+    side's spread needs two values)."""
+    if effect <= 0 or sd < 0 or not 0 < power < 1 or not 0 < alpha < 1:
+        raise ValueError("seeds need effect > 0, sd >= 0, 0 < power < 1 and 0 < alpha < 1")
+    normal = NormalDist()
+    z = normal.inv_cdf(1 - alpha / 2) + normal.inv_cdf(power)
+    return max(2, math.ceil(2 * (z * sd / effect) ** 2))

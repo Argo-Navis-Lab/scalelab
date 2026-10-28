@@ -2,18 +2,20 @@
 model."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
 
 from scalelab import cli
 from scalelab.cli import main
-from scalelab.core.config import RuntimeConfig, load_config
+from scalelab.core.config import ExperimentConfig, RuntimeConfig, load_config
 from scalelab.core.envcapture import EnvInfo, capture_env
 from scalelab.core.hashing import config_hash, run_id
 from scalelab.core.registry import Registry
+from scalelab.core.sweep import expand, load_sweep
 from scalelab.costmodel.specs import CPU
-from scalelab.rl.costing import predict_job
+from scalelab.rl.costing import JobPrediction, predict_job
 
 REPO = Path(__file__).resolve().parents[2]
 RL = REPO / "configs" / "experiments" / "rl.yaml"
@@ -100,9 +102,53 @@ def test_a_job_too_big_for_the_device_exits_1(
 
 def test_every_sweep_file_plans_on_the_t4(home: Path) -> None:
     paths = sorted((REPO / "configs" / "sweeps").glob("*.yaml"))
-    assert [path.stem for path in paths] == ["local", "pilot", "warmstarts"]
+    assert [path.stem for path in paths] == [
+        "local",
+        "main-dapo",
+        "main-grpo",
+        "main-rloo",
+        "pilot",
+        "seeds",
+        "warmstarts",
+    ]
     for path in paths:
         assert main(["sweep", "plan", str(path), "--hardware", "t4"]) == 0
+
+
+def test_plan_prices_each_config_once_for_all_its_seeds(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    priced: list[str] = []
+
+    def counted(config: ExperimentConfig, *rest: Any) -> JobPrediction:
+        priced.append(config_hash(config))
+        return predict_job(config, *rest)
+
+    monkeypatch.setattr(cli, "predict_job", counted)
+    path = write_sweep(tmp_path, axes={"algo": ["algo=grpo", "algo=rloo"]}, seeds=[0, 1, 2])
+    assert main(["sweep", "plan", str(path), "--hardware", "cpu"]) == 0
+    assert len(priced) == len(set(priced)) == 2  # m4s10: 6 jobs, 2 configs
+    rows = [
+        line.split() for line in capsys.readouterr().out.splitlines() if line[:3].strip().isdigit()
+    ]
+    assert [row[1:3] for row in rows] == [[priced[n % 2], str(n // 2)] for n in range(6)]
+    assert rows[0][3:] == rows[2][3:] == rows[4][3:]  # each seed priced as the first
+
+
+def test_the_main_sweep_takes_in_the_seed_study() -> None:
+    """m4s10: the seed study's runs are main-grpo.yaml's m2/m4 runs (same configs and seeds),
+    so at the same commit, seeds 0-4 are already done when main-grpo.yaml is submitted."""
+
+    def runs(name: str) -> set[tuple[str, int]]:
+        sweep = load_sweep(REPO / "configs" / "sweeps" / f"{name}.yaml")
+        resolved = [cli.resolve(sweep.experiment, overrides) for overrides in expand(sweep)]
+        return {(config_hash(config), seed) for config, seed, _ in resolved}
+
+    seeds, main_sweep = runs("seeds"), runs("main-grpo")
+    assert (len(seeds), len(main_sweep)) == (20, 25)
+    shared = seeds & main_sweep
+    assert len({config for config, _ in shared}) == 2  # grpo m2 and m4
+    assert sorted(seed for _, seed in shared) == [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
 
 
 @pytest.fixture

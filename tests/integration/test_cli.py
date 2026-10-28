@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
 from pathlib import Path
@@ -18,9 +19,11 @@ from scalelab.analysis.scaling import (
     NEAR,
     cumulative_compute,
     fit_run,
+    pooled_rate,
     run_points,
     step_reaching,
 )
+from scalelab.analysis.stats import EFFECT, detection_power, seeds_for_power
 from scalelab.cli import main
 from scalelab.core.checkpoint import latest_checkpoint, load_checkpoint
 from scalelab.core.config import RuntimeConfig, load_config
@@ -607,3 +610,35 @@ def test_fit_prints_each_grading_and_the_curve_through_them(
     shutil.rmtree(metrics_folder(home, run_id))  # as if it ran with runtime.telemetry=false
     assert main(["fit", run_id]) == 2
     assert f"{run_id}: the metrics stop before step 1, a graded one" in capsys.readouterr().err
+
+
+# --- added in m4s10: the seed study's spread, and the power it leaves a comparison ---
+
+
+def test_power_prints_each_seeds_final_r_and_the_power_their_spread_gives(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    warm_start = warm_started(home)
+    assert main(["power", warm_start, warm_start]) == 2
+    assert "a run is given twice" in capsys.readouterr().err
+    rl = [*SMALL_RL, "rl.flops=3e10", f"rl.from_run={warm_start}"]
+    assert main(["run", str(RL), *rl]) == 0
+    registry = Registry.sqlite(home / "registry.db")
+    (run_id,) = [run.run_id for run in registry.list_runs() if run.run_id != warm_start]
+    capsys.readouterr()
+    assert main(["power", run_id]) == 2
+    assert "has one run: a spread needs two seeds or more" in capsys.readouterr().err
+    assert main(["run", str(RL), *rl, "seed=1"]) == 0
+    other = run_id.replace("-s0-", "-s1-")
+    capsys.readouterr()
+    assert main(["power", run_id, other]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    finals = [pooled_rate(load_gradings(home, run)[-1], ALL_OPS)[0] for run in (run_id, other)]
+    sd = statistics.stdev(finals)
+    assert lines[0] == f"config:        {run_id.split('-')[0]}, 2 runs"
+    assert [line.split()[0] for line in lines[2:4]] == [run_id, other]
+    assert lines[4].startswith(f"final R:       mean {statistics.fmean(finals):.1%}, sd ")
+    power = f"{detection_power(EFFECT, sd, 5):.0%} to see 3 pp with 5 seeds a side"
+    assert lines[5] == f"power:         {power} (two-sided, alpha 0.05)"
+    assert lines[6] == f"seeds:         {seeds_for_power(EFFECT, sd)} a side for 80%"
+    assert main(["power", run_id, other, "--seeds", "1"]) == 2

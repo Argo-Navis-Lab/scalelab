@@ -1,13 +1,20 @@
 """Statistics tests: the interquartile mean by hand, bootstrap intervals by hand on tiny cases,
-their coverage on simulated eval sets, one draw of problems shared by every seed, and the
-interval's reproducibility, monotonicity in the confidence and refusal of bad input."""
+their coverage on simulated eval sets, one draw of problems shared by every seed, the
+interval's reproducibility, monotonicity in the confidence and refusal of bad input, and the
+power of a comparison across seeds by hand (m4s10)."""
 
 import math
 
 import numpy as np
 import pytest
 
-from scalelab.analysis.stats import Interval, bootstrap_interval, iqm
+from scalelab.analysis.stats import (
+    Interval,
+    bootstrap_interval,
+    detection_power,
+    iqm,
+    seeds_for_power,
+)
 
 
 def test_iqm_cuts_a_quarter_off_each_end() -> None:
@@ -113,3 +120,41 @@ def test_bad_options_are_refused() -> None:
     for confidence in (0.0, 1.0):
         with pytest.raises(ValueError, match="confidence"):
             bootstrap_interval([1.0, 2.0], confidence=confidence)
+
+
+# --- added in m4s10: the power of a comparison across seeds ---
+
+
+def test_detection_power_by_hand() -> None:
+    # 3 pp apart, sd 2 pp, 5 seeds a side: the difference's standard error is 2 sqrt(2/5) =
+    # 1.265 pp, so 3 pp is 2.372 of them; less 1.960 (two-sided 5%) leaves 0.412: Phi = 0.660
+    assert detection_power(0.03, 0.02, 5) == pytest.approx(0.6597, abs=1e-4)
+    assert detection_power(0.03, 0.0, 5) == 1.0  # no spread: any difference shows
+    powers = [detection_power(0.03, 0.02, seeds) for seeds in range(1, 30)]
+    assert powers == sorted(powers)  # more seeds, more power
+    assert detection_power(0.03, 0.02, 5, alpha=0.01) < powers[4]  # a stricter test sees less
+
+
+def test_seeds_for_power_is_the_textbook_count_and_the_fewest_that_reach_it() -> None:
+    assert seeds_for_power(1.0, 1.0) == 16  # one sd apart, 80%, 5%: 2 x 2.802^2 = 15.7 -> 16
+    assert seeds_for_power(0.03, 0.02) == 7  # 2 x (2.802 x 2/3)^2 = 6.98 -> 7
+    assert seeds_for_power(0.03, 0.0) == 2  # a side's spread needs two values
+    for sd in np.linspace(0.005, 0.05, 37):
+        seeds = seeds_for_power(0.03, float(sd))
+        assert detection_power(0.03, float(sd), seeds) >= 0.8
+        if seeds > 2:
+            assert detection_power(0.03, float(sd), seeds - 1) < 0.8
+
+
+@pytest.mark.parametrize(
+    ("effect", "sd", "seeds", "alpha"),
+    [(0.0, 0.02, 5, 0.05), (0.03, -0.01, 5, 0.05), (0.03, 0.02, 0, 0.05), (0.03, 0.02, 5, 1.0)],
+)
+def test_power_refuses_bad_input(effect: float, sd: float, seeds: int, alpha: float) -> None:
+    with pytest.raises(ValueError, match="power needs"):
+        detection_power(effect, sd, seeds, alpha)
+    if seeds >= 1:
+        with pytest.raises(ValueError, match="seeds need"):
+            seeds_for_power(effect, sd, alpha=alpha)
+    with pytest.raises(ValueError, match="seeds need"):
+        seeds_for_power(0.03, 0.02, power=1.0)

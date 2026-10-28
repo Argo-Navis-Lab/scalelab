@@ -9,6 +9,7 @@ import re
 import shutil
 import signal
 import socket
+import statistics
 import sys
 import tempfile
 import time
@@ -29,10 +30,19 @@ from scalelab.analysis.scaling import (
     NEAR,
     cumulative_compute,
     fit_run,
+    pooled_rate,
     run_points,
     step_reaching,
 )
-from scalelab.analysis.stats import Interval
+from scalelab.analysis.stats import (
+    ALPHA,
+    EFFECT,
+    POWER,
+    SEEDS,
+    Interval,
+    detection_power,
+    seeds_for_power,
+)
 from scalelab.bench.comms import SIZES, Backend, bench_collectives
 from scalelab.bench.suites import (
     HALF_SUITES,
@@ -98,6 +108,7 @@ from scalelab.costmodel.validate import (
 )
 from scalelab.models.transformer import Transformer
 from scalelab.rl.costing import (
+    JobPrediction,
     measured_step,
     padding_cut,
     predict_gradings,
@@ -666,6 +677,58 @@ def fit(run_ids: Sequence[str]) -> int:
     return 0
 
 
+def power(run_ids: Sequence[str], effect: float, seeds: int) -> int:
+    """`scalelab power` (m4s10): the seed study. Finished RL runs grouped by config, each run's
+    R (greedy pass@1 on its operations' problems, pooled, as `fit` reads it) at step 0 and at
+    its last grading, the final R's spread across seeds, and how likely `seeds` seeds a side
+    are to tell apart two variants whose final R differ by `effect` (analysis/stats.py).
+    Prints them, records nothing."""
+    if effect <= 0 or seeds < 2:
+        raise UsageError("--effect must be above 0 and --seeds at least 2")
+    if len(set(run_ids)) < len(run_ids):
+        raise UsageError("a run is given twice: each seed counts once")
+    home = scalelab_home()
+    groups: dict[str, list[tuple[str, str]]] = {}  # config hash -> [(run_id, its operations)]
+    with registry_copy(home) as registry:
+        for run_id in run_ids:
+            run = registry.get_run(run_id)
+            if run is None:
+                raise UsageError(f"no run {run_id} in the registry")
+            if run.status != "done":
+                raise UsageError(f"{run_id} is {run.status}: only finished runs count")
+            config_json = registry.experiment_json(run.config_hash)
+            assert config_json is not None  # every run row points at an experiment row
+            recorded = json.loads(config_json)  # read raw, as old runs' configs may not load
+            if recorded.get("rl") is None:
+                raise UsageError(f"{run_id} is a warm start: only RL runs have a final R")
+            ops = recorded["task"].get("ops") or ALL_OPS
+            groups.setdefault(run.config_hash, []).append((run_id, ops))
+    for config_hash, runs in groups.items():
+        if len(runs) < 2:
+            raise UsageError(f"config {config_hash} has one run: a spread needs two seeds or more")
+    for config_hash, runs in groups.items():
+        print(f"config:        {config_hash}, {len(runs)} runs")
+        print(f"{'run':<30}{'step':>6}{'R_0':>8}{'R':>8}")
+        finals: list[float] = []
+        for run_id, ops in runs:
+            gradings = load_gradings(home, run_id)
+            try:
+                first, _ = pooled_rate(gradings[0], ops)
+                final, _ = pooled_rate(gradings[-1], ops)
+            except (IndexError, ValueError) as err:
+                raise UsageError(f"{run_id}: {err or 'no gradings'}") from None
+            finals.append(final)
+            print(f"{run_id:<30}{gradings[-1].step:>6}{first:>8.1%}{final:>8.1%}")
+        mean, sd = statistics.fmean(finals), statistics.stdev(finals)
+        chance = detection_power(effect, sd, seeds)
+        print(f"final R:       mean {mean:.1%}, sd {100 * sd:.2f} pp across {len(finals)} seeds")
+        seen = f"{100 * effect:g} pp with {seeds} seeds a side"
+        print(f"power:         {chance:.0%} to see {seen} (two-sided, alpha {ALPHA:g})")
+        print(f"seeds:         {seeds_for_power(effect, sd)} a side for {POWER:.0%}")
+        print()
+    return 0
+
+
 def overhead(experiment: Path, overrides: Sequence[str], steps: int, warmup: int) -> int:
     """`scalelab overhead`: what telemetry adds to an RL experiment's step time. Runs its
     first steps twice from its warm start, without telemetry and with it, and records
@@ -968,6 +1031,7 @@ def sweep_plan(
     sessions: list[int] = []  # each job's, at SESSION_MARGIN
     too_big: list[int] = []  # the numbers of the jobs that need more memory than there is
     planned: list[PlannedJob] = []  # m4s5
+    predicted: dict[tuple[str, RuntimeConfig], JobPrediction] = {}  # m4s10: one per config
     print(f"job  {'config':<18}seed  runtime     steps  s/step  hours   GiB  sessions")
     for number, overrides in enumerate(jobs, start=1):
         try:
@@ -980,7 +1044,10 @@ def sweep_plan(
                 f"jobs {seen[run]} and {number} are the same run: config {run[0]}, seed {seed}"
             )
         seen[run] = number
-        job = predict_job(config, runtime, hardware, efficiencies)
+        key = (run[0], runtime)  # a config's seeds share its prediction
+        if key not in predicted:
+            predicted[key] = predict_job(config, runtime, hardware, efficiencies)
+        job = predicted[key]
         planned.append(PlannedJob(overrides, config, seed, job.seconds))
         total += job.seconds
         sessions.append(math.ceil(job.seconds * SESSION_MARGIN / (session_hours * 3600)))
@@ -1472,6 +1539,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         "fit", help="RL runs' pass rate against compute, and the sigmoid fit through it"
     )
     fit_parser.add_argument("run_ids", nargs="+", help="one or more finished RL runs")
+    power_parser = commands.add_parser(
+        "power", help="final R's spread across seeds, and the power it leaves a comparison"
+    )
+    power_parser.add_argument("run_ids", nargs="+", help="finished RL runs, 2+ seeds a config")
+    power_parser.add_argument(
+        "--effect", type=float, default=EFFECT, help=f"the difference to see (default {EFFECT:g})"
+    )
+    power_parser.add_argument(
+        "--seeds", type=int, default=SEEDS, help=f"seeds a side (default {SEEDS})"
+    )
     overhead_parser = commands.add_parser(
         "overhead", help="time an RL experiment's steps without and with telemetry"
     )
@@ -1671,6 +1748,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return bands(args.run_ids, args.problems)
         if args.command == "fit":
             return fit(args.run_ids)
+        if args.command == "power":
+            return power(args.run_ids, args.effect, args.seeds)
         if args.command == "overhead":
             return overhead(args.experiment, args.overrides, args.steps, args.warmup)
         if args.command == "report" and args.report == "cost":

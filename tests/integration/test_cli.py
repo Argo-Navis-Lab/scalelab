@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from scalelab.analysis.reports import gains
+from scalelab.analysis.scaling import ALL_OPS, fit_run, run_points
 from scalelab.cli import main
 from scalelab.core.checkpoint import latest_checkpoint, load_checkpoint
 from scalelab.core.config import RuntimeConfig, load_config
@@ -564,3 +565,35 @@ def test_an_rl_run_is_watched_against_its_predicted_step_once_validated(
         f"{limit:.3f} s are a regression (step: median -28.0%, spread 5.0%)\n"
     )
     assert line in capsys.readouterr().out
+
+
+# --- added in m4s8: each RL run's pass rate against its compute, and the curve through it ---
+
+
+def test_fit_prints_each_grading_and_the_curve_through_them(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    warm_start = warm_started(home)
+    assert main(["fit", warm_start]) == 2
+    assert "is a warm start: only RL runs have a curve" in capsys.readouterr().err
+    rl = [*SMALL_RL, "rl.flops=3e10", f"rl.from_run={warm_start}"]  # 3 steps or more
+    assert main(["run", str(RL), *rl]) == 0
+    registry = Registry.sqlite(home / "registry.db")
+    (run_id,) = [run.run_id for run in registry.list_runs() if run.run_id != warm_start]
+    capsys.readouterr()
+    assert main(["fit", run_id]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    points = run_points(load_gradings(home, run_id), read_metrics(home, run_id), ALL_OPS)
+    assert points[-1].compute >= 3e10 > points[-2].compute  # C is what rl.flops spends
+    curve = fit_run(points).curve
+    assert lines[0] == f"run:           {run_id}"
+    pooled = f"pooled ({points[0].n} of them)"
+    assert lines[1] == f"R:             greedy pass@1 on its +-* problems, {pooled}"
+    table = [line.split() for line in lines[3 : 3 + len(points)]]
+    assert [int(row[0]) for row in table] == [point.step for point in points]
+    assert [float(row[1]) for row in table] == pytest.approx([p.compute for p in points], rel=1e-2)
+    assert lines[3 + len(points)].startswith(f"fit:           A {curve.a:.1%}, C_mid ")
+
+    shutil.rmtree(metrics_folder(home, run_id))  # as if it ran with runtime.telemetry=false
+    assert main(["fit", run_id]) == 2
+    assert f"{run_id}: the metrics stop before step 1, a graded one" in capsys.readouterr().err

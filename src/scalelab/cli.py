@@ -24,6 +24,7 @@ import yaml
 from scalelab.analysis.bands import CEILING, FLOOR, pick_bands
 from scalelab.analysis.costreport import load_measurements, write_report
 from scalelab.analysis.reports import gains
+from scalelab.analysis.scaling import ALL_OPS, NEAR, fit_run, run_points
 from scalelab.analysis.stats import Interval
 from scalelab.bench.comms import SIZES, Backend, bench_collectives
 from scalelab.bench.suites import (
@@ -607,6 +608,49 @@ def bands(run_ids: Sequence[str], problems: int) -> int:
     print(f"rule:          {smallest} at least {FLOOR:.0%} and {largest} at most {CEILING:.0%}")
     kept = pick_bands(rates[0], rates[-1])
     print(f"bands:         {', '.join(str(band) for band in kept) if kept else 'none'}")
+    return 0
+
+
+def fit(run_ids: Sequence[str]) -> int:
+    """`scalelab fit` (m4s8): finished RL runs' pass rate R against their compute C at each
+    grading, and the saturating sigmoid fit through them (analysis/scaling.py). R is greedy
+    pass@1 on the problems of the run's operations (task.ops), pooled over its eval sets; C
+    is A's FLOPs, summed from its metrics. Prints them, records nothing."""
+    home = scalelab_home()
+    found: list[tuple[str, str]] = []  # (run_id, its operations)
+    with registry_copy(home) as registry:
+        for run_id in run_ids:
+            run = registry.get_run(run_id)
+            if run is None:
+                raise UsageError(f"no run {run_id} in the registry")
+            if run.status != "done":
+                raise UsageError(f"{run_id} is {run.status}: only finished runs are fit")
+            config_json = registry.experiment_json(run.config_hash)
+            assert config_json is not None  # every run row points at an experiment row
+            recorded = json.loads(config_json)  # read raw, as old runs' configs may not load
+            if recorded.get("rl") is None:
+                raise UsageError(f"{run_id} is a warm start: only RL runs have a curve")
+            found.append((run_id, recorded["task"].get("ops") or ALL_OPS))
+    for run_id, ops in found:
+        try:
+            points = run_points(load_gradings(home, run_id), read_metrics(home, run_id), ops)
+            result = fit_run(points)
+        except ValueError as err:
+            raise UsageError(f"{run_id}: {err}") from None
+        curve = result.curve
+        print(f"run:           {run_id}")
+        print(f"R:             greedy pass@1 on its {ops} problems, pooled ({points[0].n} of them)")
+        print(f"{'step':>6}{'C':>12}{'R':>8}{'fitted':>8}")
+        for point, fitted in zip(points, curve([point.compute for point in points]), strict=True):
+            print(f"{point.step:>6}{point.compute:>12.3g}{point.rate:>8.1%}{fitted:>8.1%}")
+        print(f"fit:           A {curve.a:.1%}, C_mid {curve.c_mid:.3g}, B {curve.b:.2f}", end="")
+        print(f" (R_0 {curve.r0:.1%}: step 0's)")
+        print(f"residuals:     {100 * result.rmse:.2f} pp rms over {result.points} gradings")
+        if result.bounded:
+            loose = ", ".join(result.bounded)
+            print(f"on a bound:    {loose}, so these gradings don't pin the curve down")
+        print(f"near A:        {NEAR:.0%} of the way from R_0 at C {curve.compute_at(NEAR):.3g}")
+        print()
     return 0
 
 
@@ -1412,6 +1456,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     bands_parser.add_argument(
         "--problems", type=int, default=1000, help="the first N of each eval set (default 1000)"
     )
+    fit_parser = commands.add_parser(
+        "fit", help="RL runs' pass rate against compute, and the sigmoid fit through it"
+    )
+    fit_parser.add_argument("run_ids", nargs="+", help="one or more finished RL runs")
     overhead_parser = commands.add_parser(
         "overhead", help="time an RL experiment's steps without and with telemetry"
     )
@@ -1609,6 +1657,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return grade(args.run_id, args.problems)
         if args.command == "bands":
             return bands(args.run_ids, args.problems)
+        if args.command == "fit":
+            return fit(args.run_ids)
         if args.command == "overhead":
             return overhead(args.experiment, args.overrides, args.steps, args.warmup)
         if args.command == "report" and args.report == "cost":

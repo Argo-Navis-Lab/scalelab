@@ -9,6 +9,7 @@ from scalelab.analysis.scaling import (
     fit_run,
     pooled_rate,
     run_points,
+    step_reaching,
 )
 from scalelab.rl.evaluation import EvalResult
 from scalelab.rl.experiment import geometric_steps
@@ -105,6 +106,16 @@ def test_compute_adds_up_each_steps_flops():
         cumulative_compute(rows({1: flops[1], 3: flops[3]}))
     with pytest.raises(ValueError, match="miss some steps"):
         cumulative_compute(rows({1: flops[1], 2: (1.0, 2.0)}))  # no training FLOPs
+
+
+def test_step_reaching_is_the_first_step_with_that_much_compute():
+    compute = {1: 6.0, 2: 12.0, 3: 18.0}
+    assert step_reaching(compute, 12.0) == 2  # exactly there counts
+    assert step_reaching(compute, 12.5) == 3
+    assert step_reaching(compute, 1.0) == 1
+    assert step_reaching({3: 18.0, 1: 6.0, 2: 12.0}, 7.0) == 2  # in step order, whatever the keys'
+    assert step_reaching(compute, 18.5) is None  # more than the whole run spent
+    assert step_reaching({}, 1.0) is None
 
 
 def grading(step: int, results: dict[str, str]) -> Grading:

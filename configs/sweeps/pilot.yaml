@@ -1,0 +1,21 @@
+# m4s9: the pilot that fixes M4's RL budget S (the M4 plan, DECIDED 7): GRPO, seed 0, at m1, m3
+# and m5 for 1000 steps each, from their 20M-token warm starts (sweep warmstarts-c67025d8), on
+# the M4 task (m4s7: * at bands 4 and 5), on the T4 in fp16, the padding cut from m2 up. S is
+# the step where the slowest of the three fitted curves gets 90% of the way from R_0 to A,
+# rounded up to a multiple of 50, at most 1000.
+name: pilot
+experiment: configs/experiments/rl.yaml
+overrides:
+  - algo=grpo
+  - runtime.precision=fp16
+  - task.ops=*
+  - task.difficulties=[4, 5]
+  - rl.max_steps=1000
+  - eval.every=100  # 8 more gradings in the last decade, where the 90% point is
+  - rl.flops=1.0e+18  # far more than 1000 steps of m5 spend: max_steps ends every run
+axes:
+  model:
+    - [model=ladder_s/m1, rl.from_run=f6fb61a313ad22ca-s0-c67025d8]
+    - [model=ladder_s/m3, rl.from_run=ba04223d86290fc4-s0-c67025d8, runtime.padding_cut=true]
+    - [model=ladder_s/m5, rl.from_run=4f906a6e9de0eac6-s0-c67025d8, runtime.padding_cut=true]
+seeds: [0]

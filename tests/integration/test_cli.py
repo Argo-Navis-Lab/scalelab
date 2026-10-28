@@ -13,7 +13,14 @@ import pytest
 import torch
 
 from scalelab.analysis.reports import gains
-from scalelab.analysis.scaling import ALL_OPS, fit_run, run_points
+from scalelab.analysis.scaling import (
+    ALL_OPS,
+    NEAR,
+    cumulative_compute,
+    fit_run,
+    run_points,
+    step_reaching,
+)
 from scalelab.cli import main
 from scalelab.core.checkpoint import latest_checkpoint, load_checkpoint
 from scalelab.core.config import RuntimeConfig, load_config
@@ -593,6 +600,9 @@ def test_fit_prints_each_grading_and_the_curve_through_them(
     assert [int(row[0]) for row in table] == [point.step for point in points]
     assert [float(row[1]) for row in table] == pytest.approx([p.compute for p in points], rel=1e-2)
     assert lines[3 + len(points)].startswith(f"fit:           A {curve.a:.1%}, C_mid ")
+    (near,) = [line for line in lines if line.startswith("near A:")]
+    step = step_reaching(cumulative_compute(read_metrics(home, run_id)), curve.compute_at(NEAR))
+    assert near.endswith(f"(step {step})" if step else f"(not reached by step {points[-1].step})")
 
     shutil.rmtree(metrics_folder(home, run_id))  # as if it ran with runtime.telemetry=false
     assert main(["fit", run_id]) == 2

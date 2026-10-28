@@ -5,7 +5,7 @@ where R is halfway from R_0 to A, and B how sharply it gets there. The curve is 
 log C: 1 / (1 + (C_mid / C)^B) = expit(B (ln C - ln C_mid))."""
 
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import accumulate
 
@@ -128,6 +128,12 @@ def cumulative_compute(rows: Iterable[MetricRow]) -> dict[int, float]:
     ):
         raise ValueError("the metrics miss some steps' FLOPs")
     return dict(zip(steps, accumulate(per_step[step] for step in steps), strict=True))
+
+
+def step_reaching(compute: Mapping[int, float], target: float) -> int | None:
+    """The first step whose C (cumulative_compute) is at least `target`; None if no step's
+    is. Where a curve's compute_at lands in a run (m4s9: the pilot's budget rule)."""
+    return next((step for step, c in sorted(compute.items()) if c >= target), None)
 
 
 def pooled_rate(grading: Grading, ops: str) -> tuple[float, int]:

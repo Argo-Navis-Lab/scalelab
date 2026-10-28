@@ -100,7 +100,7 @@ def test_a_job_too_big_for_the_device_exits_1(
 
 def test_every_sweep_file_plans_on_the_t4(home: Path) -> None:
     paths = sorted((REPO / "configs" / "sweeps").glob("*.yaml"))
-    assert [path.stem for path in paths] == ["local", "warmstarts"]
+    assert [path.stem for path in paths] == ["local", "pilot", "warmstarts"]
     for path in paths:
         assert main(["sweep", "plan", str(path), "--hardware", "t4"]) == 0
 

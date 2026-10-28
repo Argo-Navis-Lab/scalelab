@@ -24,7 +24,14 @@ import yaml
 from scalelab.analysis.bands import CEILING, FLOOR, pick_bands
 from scalelab.analysis.costreport import load_measurements, write_report
 from scalelab.analysis.reports import gains
-from scalelab.analysis.scaling import ALL_OPS, NEAR, fit_run, run_points
+from scalelab.analysis.scaling import (
+    ALL_OPS,
+    NEAR,
+    cumulative_compute,
+    fit_run,
+    run_points,
+    step_reaching,
+)
 from scalelab.analysis.stats import Interval
 from scalelab.bench.comms import SIZES, Backend, bench_collectives
 from scalelab.bench.suites import (
@@ -632,11 +639,13 @@ def fit(run_ids: Sequence[str]) -> int:
                 raise UsageError(f"{run_id} is a warm start: only RL runs have a curve")
             found.append((run_id, recorded["task"].get("ops") or ALL_OPS))
     for run_id, ops in found:
+        rows = read_metrics(home, run_id)
         try:
-            points = run_points(load_gradings(home, run_id), read_metrics(home, run_id), ops)
+            points = run_points(load_gradings(home, run_id), rows, ops)
             result = fit_run(points)
         except ValueError as err:
             raise UsageError(f"{run_id}: {err}") from None
+        compute = cumulative_compute(rows)  # every step's C (run_points has checked them)
         curve = result.curve
         print(f"run:           {run_id}")
         print(f"R:             greedy pass@1 on its {ops} problems, pooled ({points[0].n} of them)")
@@ -649,7 +658,10 @@ def fit(run_ids: Sequence[str]) -> int:
         if result.bounded:
             loose = ", ".join(result.bounded)
             print(f"on a bound:    {loose}, so these gradings don't pin the curve down")
-        print(f"near A:        {NEAR:.0%} of the way from R_0 at C {curve.compute_at(NEAR):.3g}")
+        near = curve.compute_at(NEAR)
+        step = step_reaching(compute, near)
+        where = f"step {step}" if step is not None else f"not reached by step {max(compute)}"
+        print(f"near A:        {NEAR:.0%} of the way from R_0 at C {near:.3g} ({where})")
         print()
     return 0
 

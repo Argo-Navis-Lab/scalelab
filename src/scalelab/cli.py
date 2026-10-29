@@ -60,6 +60,7 @@ from scalelab.core.checkpoint import CheckpointPolicy
 from scalelab.core.config import (
     ExperimentConfig,
     ModelConfig,
+    RLConfig,
     RuntimeConfig,
     load_config,
     parse_override,
@@ -171,6 +172,9 @@ def split_overrides(overrides: Sequence[str]) -> tuple[int, dict[str, Any], list
     return seed, runtime, config
 
 
+PROGRESS_SECONDS = 300.0  # m4s10b: a progress line this often while a run trains
+
+
 def duration(seconds: float) -> str:
     """A length of time, rounded the way a person would say it: "40 s", "12 min", "3.2 h"."""
     if seconds < 90:
@@ -194,6 +198,14 @@ def flops_speed(flops: float, seconds: float, done: float, budget: float) -> str
     per_second = flops / seconds
     left = max(0.0, budget - done) / per_second
     return f"{per_second:.2e} FLOPs/s, about {duration(left)} to go"
+
+
+def rl_end(rl: RLConfig, flops: float, step: int) -> float:
+    """Where an RL run ends, in FLOPs: its budget, or rl.max_steps at the FLOPs a step so far
+    (`flops` spent in `step` steps)."""
+    if rl.max_steps is None:
+        return rl.flops
+    return min(rl.flops, flops / step * rl.max_steps)
 
 
 def sampled_rate(result: SampledResult | None) -> str:
@@ -438,13 +450,44 @@ def run(
         else:
             if last_flops is not None and now > last_time and config.rl is not None:
                 done = metrics.flops - last_flops  # FLOPs spent since the last grading
-                end = config.rl.flops  # where the run will end, in FLOPs: its budget, or...
-                if config.rl.max_steps is not None:  # ...max_steps, at the FLOPs a step so far
-                    end = min(end, metrics.flops / metrics.step * config.rl.max_steps)
+                end = rl_end(config.rl, metrics.flops, metrics.step)
                 pace = f"  ({flops_speed(done, now - last_time, metrics.flops, end)})"
             last_flops = metrics.flops
             print(f"step {metrics.step:,}: reward {metrics.reward:.3f}  {rates}{pace}")
         last_time = now
+
+    progress_at: tuple[float, int, float] | None = None  # m4s10b: (time, step, budget spent)
+
+    def progress(metrics: object) -> None:
+        """After every step: the caller's on_step (the worker's heartbeat), then a line with
+        the pace since the last one every PROGRESS_SECONDS (m4s10b: gradings come at geometric
+        steps, so late in a run they are hours apart)."""
+        nonlocal progress_at
+        if on_step is not None:
+            on_step(metrics)
+        if isinstance(metrics, RLStepMetrics):
+            assert config.rl is not None  # an RL step comes from an RL run
+            spent, end = float(metrics.flops), rl_end(config.rl, metrics.flops, metrics.step)
+            what = f"reward {metrics.reward:.3f}"
+        else:
+            assert isinstance(metrics, StepMetrics)
+            spent, end = float(metrics.tokens), float(config.warm_start.tokens)
+            what = f"loss {metrics.loss:.3f}"
+        now = time.monotonic()
+        if progress_at is None:  # this session's first step (a resumed run starts mid-way)
+            progress_at = (now, metrics.step, spent)
+            return
+        then, step, before = progress_at
+        if now - then < PROGRESS_SECONDS:
+            return
+        progress_at = (now, metrics.step, spent)
+        pace = (now - then) / (metrics.step - step)
+        left = max(0.0, end - spent) / ((spent - before) / (now - then))
+        share = min(spent / end, 1.0)  # the last step overshoots the budget a little
+        print(
+            f"step {metrics.step:,}: {what}, {pace:.2f} s a step, {share:.0%} of the budget, "
+            f"about {duration(left)} to go"
+        )
 
     def record_anomaly(event: AnomalyEvent) -> None:
         """Record one event of the online detectors, and say what was found."""
@@ -493,7 +536,7 @@ def run(
                     sink,
                     padding_cut=runtime.padding_cut,  # m3s16
                     precision=runtime.precision,  # m3s21
-                    on_step=on_step,  # m4s6
+                    on_step=progress,  # m4s6
                 )
             else:
                 metrics = run_rl_experiment(
@@ -510,7 +553,7 @@ def run(
                     padding_cut=runtime.padding_cut,  # m3s16
                     precision=runtime.precision,  # m3s22
                     throughput=throughput,  # m3s25
-                    on_step=on_step,
+                    on_step=progress,
                 )
         except RunHalted as halted:
             registry.finish_run(run_id, "failed")

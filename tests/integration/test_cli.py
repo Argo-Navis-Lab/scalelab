@@ -13,6 +13,7 @@ from typing import get_args
 import pytest
 import torch
 
+from scalelab import cli
 from scalelab.analysis.reports import gains
 from scalelab.analysis.scaling import (
     ALL_OPS,
@@ -642,3 +643,32 @@ def test_power_prints_each_seeds_final_r_and_the_power_their_spread_gives(
     assert lines[5] == f"power:         {power} (two-sided, alpha 0.05)"
     assert lines[6] == f"seeds:         {seeds_for_power(EFFECT, sd)} a side for 80%"
     assert main(["power", run_id, other, "--seeds", "1"]) == 2
+
+
+# --- added in m4s10b: progress lines between gradings ---
+
+PROGRESS = re.compile(
+    r"step ([\d,]+): (?:loss|reward) -?\d+\.\d{3}, \d+\.\d{2} s a step, (\d+)% of the budget, "
+    r"about \d+ s to go"
+)
+
+
+def test_runs_print_a_progress_line_every_progress_seconds(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    monkeypatch.setattr(cli, "PROGRESS_SECONDS", 0.0)  # a line after every step but the first
+    warm_start = warm_started(home)
+    rl = [*SMALL_RL, "rl.flops=3e10", f"rl.from_run={warm_start}"]
+    assert main(["run", str(RL), *rl]) == 0
+    out = capsys.readouterr().out
+    warm, rl_part = out.split("started", 2)[1:]  # each run prints "started" first
+    for part, measured in ((warm, "loss"), (rl_part, "reward")):
+        found = [(PROGRESS.fullmatch(line), line) for line in part.splitlines()]
+        lines = [(match, line) for match, line in found if match is not None]
+        (ran,) = re.findall(r"done: ran (\d+) steps", part)
+        steps = [int(match.group(1).replace(",", "")) for match, _ in lines]
+        assert steps == list(range(2, int(ran) + 1))  # every step but the first
+        shares = [int(match.group(2)) for match, _ in lines]
+        assert shares == sorted(shares) and shares[-1] == 100
+        assert all(f": {measured} " in line for _, line in lines)
+        assert lines[-1][1].endswith("about 0 s to go")

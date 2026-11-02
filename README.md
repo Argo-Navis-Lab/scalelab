@@ -9,6 +9,12 @@
 Write-ups: [1. The cost model, and what it says about RL's bottlenecks](docs/writeups/01-cost-model.md) (M3).
 
 > [!IMPORTANT]
-> **Training Mode.** **ScaleLab** is a research project, built step by step as a hands-on study of how reinforcement learning scales with model size and compute. It follows a written blueprint through eight milestones (M0–M7). M0–M3 are complete; M4, the scaling study and its pre-registered prediction, is in progress.
->
-> Every change lands only after passing linting (ruff), strict type checking (pyright) and the full test suite in CI. Until a milestone closes, expect interfaces, configs and file formats to change, and treat results as preliminary unless a write-up reports them.
+> ***ScaleLab is on a ~400 Hours Training Phase: 1–20 November 2026.*** 
+> Nov.01 → Nov.20
+
+> [!NOTE]
+> **ScaleLab** ScaleLab is a research project, built step by step as a hands-on study of how reinforcement learning scales with model size and compute. Until a milestone closes, expect interfaces, configs and file formats to change, and treat results as preliminary unless a write-up reports them.
+
+---
+
+Maintained by SOHEIL SANATI MOUTABAN · [Argo Navis Lab](https://github.com/Argo-Navis-Lab)

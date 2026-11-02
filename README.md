@@ -9,12 +9,11 @@
 Write-ups: [1. The cost model, and what it says about RL's bottlenecks](docs/writeups/01-cost-model.md) (M3).
 
 > [!IMPORTANT]
-> ***ScaleLab is on a ~400 Hours Training Phase: 1–20 November 2026.*** 
-> Nov.01 → Nov.20
+> ***ScaleLab is in a ~400 Hours Training Phase:*** 1 – 20 November 2026
 
 > [!NOTE]
-> **ScaleLab** ScaleLab is a research project, built step by step as a hands-on study of how reinforcement learning scales with model size and compute. Until a milestone closes, expect interfaces, configs and file formats to change, and treat results as preliminary unless a write-up reports them.
+> ***ScaleLab*** *is a research project, built step by step as a hands-on study of how reinforcement learning scales with model size and compute. Until a milestone closes, expect interfaces, configs and file formats to change, and treat results as preliminary unless a write-up reports them.*
 
 ---
 
-Maintained by SOHEIL SANATI MOUTABAN · [Argo Navis Lab](https://github.com/Argo-Navis-Lab)
+Maintained by **SOHEIL SANATI MOUTABAN** · [Argo Navis Lab](https://github.com/Argo-Navis-Lab)

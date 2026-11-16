@@ -169,3 +169,109 @@ def fit_run(points: Sequence[Point]) -> Fit:
         raise ValueError("a run's points must start at step 0, the warm start's grading")
     rest = points[1:]
     return fit_curve([p.compute for p in rest], [p.rate for p in rest], points[0].rate)
+
+
+# m4s12: one family of curves across model sizes
+N_REF = 1e7  # sizes enter as x = log10(N / N_REF): m1 -1.10 .. m5 0.77, m7 1.31
+MIN_SIZES = 3  # each line has two numbers: a third size is the first that can disagree
+LOGIT_A_LIMIT = 10.0  # A's intercept within expit(-10) .. expit(10): 0.005% .. 99.995%
+FAMILY_PARAMETERS = ("a0", "a1", "c0", "c1", "b0", "b1")  # least_squares' order
+
+
+@dataclass(frozen=True)
+class Family:
+    """Each size N's curve from six numbers, every parameter a line in x = log10(N / N_REF):
+    logit A = a0 + a1 x, ln C_mid = c0 + c1 x, ln B = b0 + b1 x. The logit keeps A within
+    0 and 1 and the logs keep C_mid and B above 0 at any size, m6 and m7 included."""
+
+    a0: float
+    a1: float
+    c0: float
+    c1: float
+    b0: float
+    b1: float
+
+    def curve(self, params: int, r0: float) -> Curve:
+        """The curve of a model with `params` non-embedding parameters, from its warm
+        start's R_0 (measured, never fitted)."""
+        x = float(np.log10(params / N_REF))
+        return Curve(
+            r0=r0,
+            a=float(expit(self.a0 + self.a1 * x)),
+            c_mid=float(np.exp(self.c0 + self.c1 * x)),
+            b=float(np.exp(self.b0 + self.b1 * x)),
+        )
+
+
+@dataclass(frozen=True)
+class SizedRun:
+    """One RL run's points (run_points, from step 0 on) and its model's size N."""
+
+    params: int
+    points: tuple[Point, ...]
+
+
+@dataclass(frozen=True)
+class FamilyFit:
+    """A family fit to runs of several sizes at once."""
+
+    family: Family
+    rmse: float  # root mean square of R's residuals over every run's gradings after step 0
+    points: int  # gradings fitted, over all runs
+    sizes: int  # distinct N among the runs
+
+
+def _start(runs: Sequence[SizedRun]) -> NDArray[np.float64]:
+    """Where the joint fit starts: each run's own curve (fit_run), its logit A, ln C_mid and
+    ln B averaged per size, then a straight line through the sizes for each."""
+    by_size: dict[int, list[list[float]]] = {}
+    for run in runs:
+        curve = fit_run(run.points).curve
+        a = float(np.clip(curve.a, 0.01, 0.99))  # a run's A may sit on 0 or 1: logit inf
+        by_size.setdefault(run.params, []).append(
+            [float(np.log(a / (1 - a))), float(np.log(curve.c_mid)), float(np.log(curve.b))]
+        )
+    x = np.log10(np.array(sorted(by_size), dtype=np.float64) / N_REF)
+    ys = np.array([np.mean(by_size[n], axis=0) for n in sorted(by_size)])  # sizes x 3
+    lines = [np.polyfit(x, ys[:, k], 1) for k in range(3)]  # each (slope, intercept)
+    return np.array([value for slope, cut in lines for value in (cut, slope)])
+
+
+def fit_family(runs: Sequence[SizedRun]) -> FamilyFit:
+    """The six numbers of a Family by least squares on R over every run's gradings after
+    step 0 at once, each run's R_0 held at its step-0 point's R. Starts from the per-size
+    lines (_start) and from flat ones through their mean, and keeps the better fit."""
+    sizes = {run.params for run in runs}
+    if len(sizes) < MIN_SIZES:
+        raise ValueError(f"a family needs runs of {MIN_SIZES} sizes or more, got {len(sizes)}")
+    for run in runs:
+        if not run.points or run.points[0].step != 0:
+            raise ValueError("a run's points must start at step 0, the warm start's grading")
+    rest = [(run, point) for run in runs for point in run.points[1:]]
+    x = np.log10(np.array([run.params for run, _ in rest], dtype=np.float64) / N_REF)
+    r0 = np.array([run.points[0].rate for run, _ in rest])
+    log_c = np.log(np.array([point.compute for _, point in rest]))
+    r = np.array([point.rate for _, point in rest])
+
+    def residuals(theta: NDArray[np.float64]) -> NDArray[np.float64]:
+        a0, a1, c0, c1, b0, b1 = theta
+        a = expit(a0 + a1 * x)
+        b = np.exp(b0 + b1 * x)
+        return r0 + (a - r0) * expit(b * (log_c - (c0 + c1 * x))) - r
+
+    span = DECADES * np.log(10)
+    inf = np.inf  # the slopes are free; the intercepts keep fit_curve's ranges
+    lower = [-LOGIT_A_LIMIT, -inf, log_c.min() - span, -inf, np.log(B_BOUNDS[0]), -inf]
+    upper = [LOGIT_A_LIMIT, inf, log_c.max() + span, inf, np.log(B_BOUNDS[1]), inf]
+    lines = np.clip(_start(runs), np.add(lower, 1e-9), np.subtract(upper, 1e-9))
+    flat = lines.copy()
+    flat[1::2] = 0.0  # every slope 0: the same curve at every size
+    best = None
+    for start in (lines, flat):
+        found = least_squares(residuals, start, bounds=(lower, upper))
+        if best is None or found.cost < best.cost:
+            best = found
+    assert best is not None
+    family = Family(*(float(value) for value in best.x))
+    rmse = float(np.sqrt(np.mean(np.square(residuals(best.x)))))
+    return FamilyFit(family=family, rmse=rmse, points=len(rest), sizes=len(sizes))

@@ -672,3 +672,26 @@ def test_runs_print_a_progress_line_every_progress_seconds(
         assert shares == sorted(shares) and shares[-1] == 100
         assert all(f": {measured} " in line for _, line in lines)
         assert lines[-1][1].endswith("about 0 s to go")
+
+
+# --- added in m4s12: one family of curves across sizes ---
+
+
+def test_joint_needs_finished_rl_runs_of_three_sizes(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    warm_start = warm_started(home)
+    assert main(["joint", warm_start]) == 2
+    assert "is a warm start: only RL runs have a curve" in capsys.readouterr().err
+    rl = [*SMALL_RL, "rl.flops=3e10", f"rl.from_run={warm_start}"]  # 3 steps or more
+    assert main(["run", str(RL), *rl]) == 0
+    assert main(["run", str(RL), *rl, "seed=1"]) == 0
+    registry = Registry.sqlite(home / "registry.db")
+    runs = sorted(run.run_id for run in registry.list_runs() if run.run_id != warm_start)
+    capsys.readouterr()
+    assert main(["joint", runs[0], runs[0]]) == 2
+    assert "a run is given twice" in capsys.readouterr().err
+    assert main(["joint", *runs]) == 2  # two seeds, but one size
+    assert "a family needs runs of 3 sizes or more, got 1" in capsys.readouterr().err
+    assert main(["joint", "nope"]) == 2
+    assert "no run nope in the registry" in capsys.readouterr().err

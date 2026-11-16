@@ -27,8 +27,11 @@ from scalelab.analysis.costreport import load_measurements, write_report
 from scalelab.analysis.reports import gains
 from scalelab.analysis.scaling import (
     ALL_OPS,
+    N_REF,
     NEAR,
+    SizedRun,
     cumulative_compute,
+    fit_family,
     fit_run,
     pooled_rate,
     run_points,
@@ -96,7 +99,7 @@ from scalelab.costmodel.report import (
 )
 from scalelab.costmodel.rlstep import StepPrediction
 from scalelab.costmodel.roofline import HALF, Efficiency, Group
-from scalelab.costmodel.specs import CPU, HARDWARE, HardwareSpec, Precision
+from scalelab.costmodel.specs import CPU, HARDWARE, HardwareSpec, ModelSpec, Precision
 from scalelab.costmodel.validate import (
     PARTS,
     TARGET_MAPE,
@@ -717,6 +720,72 @@ def fit(run_ids: Sequence[str]) -> int:
         where = f"step {step}" if step is not None else f"not reached by step {max(compute)}"
         print(f"near A:        {NEAR:.0%} of the way from R_0 at C {near:.3g} ({where})")
         print()
+    return 0
+
+
+def joint(run_ids: Sequence[str]) -> int:
+    """`scalelab joint` (m4s12): one family of curves through finished RL runs of three sizes
+    or more, every run's gradings fit at once (analysis/scaling.py fit_family): A, C_mid and B
+    as lines in log N, each run's R_0 its own step 0's. Prints the family and, size by size,
+    its curve next to the runs' last gradings. Records nothing."""
+    if len(set(run_ids)) < len(run_ids):
+        raise UsageError("a run is given twice: each seed counts once")
+    home = scalelab_home()
+    found: list[tuple[str, str, ModelConfig]] = []  # (run_id, its operations, its model)
+    with registry_copy(home) as registry:
+        for run_id in run_ids:
+            run = registry.get_run(run_id)
+            if run is None:
+                raise UsageError(f"no run {run_id} in the registry")
+            if run.status != "done":
+                raise UsageError(f"{run_id} is {run.status}: only finished runs are fit")
+            config_json = registry.experiment_json(run.config_hash)
+            assert config_json is not None  # every run row points at an experiment row
+            recorded = json.loads(config_json)  # read raw, as old runs' configs may not load
+            if recorded.get("rl") is None:
+                raise UsageError(f"{run_id} is a warm start: only RL runs have a curve")
+            model = ModelConfig.model_validate(recorded["model"])
+            found.append((run_id, recorded["task"].get("ops") or ALL_OPS, model))
+    if len({ops for _, ops, _ in found}) > 1:
+        raise UsageError("the runs grade different operations: one family needs one R")
+    runs: list[SizedRun] = []
+    names: dict[int, str] = {}  # N -> the size's name
+    for run_id, ops, model in found:
+        params = ModelSpec.from_config(model).param_counts().non_embedding
+        names[params] = model.name
+        try:
+            points = run_points(load_gradings(home, run_id), read_metrics(home, run_id), ops)
+        except ValueError as err:
+            raise UsageError(f"{run_id}: {err}") from None
+        runs.append(SizedRun(params=params, points=tuple(points)))
+    try:
+        result = fit_family(runs)
+    except ValueError as err:
+        raise UsageError(str(err)) from None
+    family = result.family
+    print(f"runs:          {len(runs)} of {result.sizes} sizes; R = greedy pass@1 on {found[0][1]}")
+    print("family:        logit A = a0 + a1 x, ln C_mid = c0 + c1 x, ln B = b0 + b1 x,")
+    print(f"               x = log10(N / {N_REF:g})")
+    print(f"fit:           a0 {family.a0:.3f}  a1 {family.a1:.3f}  c0 {family.c0:.3f}", end="")
+    print(f"  c1 {family.c1:.3f}  b0 {family.b0:.3f}  b1 {family.b1:.3f}")
+    print(f"residuals:     {100 * result.rmse:.2f} pp rms over {result.points} gradings")
+    print(f"{'size':<6}{'N':>9}{'runs':>5}{'R_0':>7}{'A':>7}{'C_mid':>10}{'B':>6}", end="")
+    print(f"{'rms pp':>8}{'last R':>8}{'fitted':>8}")
+    for params in sorted(names):
+        mine = [run for run in runs if run.params == params]
+        r0 = statistics.mean(run.points[0].rate for run in mine)
+        curve = family.curve(params, r0)
+        misses = [
+            float(curve(point.compute)) - point.rate for run in mine for point in run.points[1:]
+        ]
+        rms = 100 * statistics.fmean(miss * miss for miss in misses) ** 0.5
+        last = statistics.mean(run.points[-1].rate for run in mine)
+        fitted = statistics.mean(float(curve(run.points[-1].compute)) for run in mine)
+        print(
+            f"{names[params]:<6}{params / 1e6:>8.2f}M{len(mine):>5}{r0:>7.1%}{curve.a:>7.1%}",
+            end="",
+        )
+        print(f"{curve.c_mid:>10.3g}{curve.b:>6.2f}{rms:>8.2f}{last:>8.1%}{fitted:>8.1%}")
     return 0
 
 
@@ -1582,6 +1651,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "fit", help="RL runs' pass rate against compute, and the sigmoid fit through it"
     )
     fit_parser.add_argument("run_ids", nargs="+", help="one or more finished RL runs")
+
+    joint_parser = commands.add_parser(
+        "joint", help="one family of sigmoid curves through RL runs of several sizes"
+    )
+    joint_parser.add_argument("run_ids", nargs="+", help="finished RL runs of 3 sizes or more")
     power_parser = commands.add_parser(
         "power", help="final R's spread across seeds, and the power it leaves a comparison"
     )
@@ -1791,6 +1865,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return bands(args.run_ids, args.problems)
         if args.command == "fit":
             return fit(args.run_ids)
+        if args.command == "joint":
+            return joint(args.run_ids)
         if args.command == "power":
             return power(args.run_ids, args.effect, args.seeds)
         if args.command == "overhead":

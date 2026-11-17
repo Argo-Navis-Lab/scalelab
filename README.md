@@ -6,7 +6,7 @@
 
 **`ScaleLab`** is a small research lab on a **Mac M2-Pro** plus a rented **Tesla T4 GPU**. It answers one question: *When you train a language model with Reinforcement Learning (RL), how much better does it get as you spend more compute, and how does that change with model size?*
 
-Write-ups: [1. The cost model, and what it says about RL's bottlenecks](docs/writeups/01-cost-model.md) (M3).
+Write-ups: [1. The cost model, and what it says about RL's bottlenecks](docs/writeups/01-cost-model.md) (M3). [2. How RL gains scale with model size, and how far one fit predicts](docs/writeups/02-scaling.md) (M4).
 
 > [!IMPORTANT]
 > ***ScaleLab is in a ~400 Hours Training Phase:*** 1 – 20 November 2026

@@ -16,6 +16,10 @@ def test_write_up_1_is_published() -> None:
     assert (WRITEUPS / "01-cost-model.md").is_file()
 
 
+def test_write_up_2_is_published() -> None:
+    assert (WRITEUPS / "02-scaling.md").is_file()
+
+
 def test_every_relative_link_resolves() -> None:
     missing = [
         f"{page.relative_to(ROOT)}: {target}"

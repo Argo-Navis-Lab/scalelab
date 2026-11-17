@@ -757,3 +757,24 @@ def test_versus_pairs_runs_by_size_and_seed_and_prints_the_difference(
     assert "two runs of m1 seed 0 on one side" in capsys.readouterr().err
     assert main(["versus", grpo, "--against", warm_start]) == 2
     assert "is a warm start: only RL runs are compared" in capsys.readouterr().err
+
+
+# --- added in m4s15: Write-up 2's figures ---
+
+
+def test_report_scaling_needs_two_algorithms_of_three_sizes_or_more(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    warm_start = warm_started(home)
+    registry = Registry.sqlite(home / "registry.db")
+    for overrides in ([], ["algo=rloo"]):
+        rl = [*SMALL_RL, f"rl.from_run={warm_start}", *overrides]
+        assert main(["run", str(RL), *rl]) == 0
+    runs = [row.run_id for row in registry.list_runs() if row.run_id != warm_start]
+    capsys.readouterr()
+    assert main(["report", "scaling", runs[0]]) == 2
+    assert "report scaling draws two algorithms, got 1" in capsys.readouterr().err
+    assert main(["report", "scaling", *runs]) == 2  # one size each: no family
+    assert "a family needs runs of 3 sizes or more, got 1" in capsys.readouterr().err
+    assert main(["report", "scaling", runs[0], runs[0]]) == 2
+    assert "a run is given twice" in capsys.readouterr().err

@@ -22,6 +22,7 @@ from typing import Any, NamedTuple, get_args
 import torch
 import yaml
 
+from scalelab.analysis import scalingreport
 from scalelab.analysis.bands import CEILING, FLOOR, pick_bands
 from scalelab.analysis.costreport import load_measurements, write_report
 from scalelab.analysis.reports import gains
@@ -910,6 +911,52 @@ class Partner(NamedTuple):
     samples_per_step: int  # completions sampled a step: prompts_per_step x group_size
 
 
+def partners(registry: Registry, run_ids: Sequence[str]) -> dict[tuple[str, int], Partner]:
+    """One side's runs by (size, seed): m4s14's loop, shared since m4s15 with report
+    scaling. Refuses two runs of one size and seed."""
+    side: dict[tuple[str, int], Partner] = {}
+    for run_id in run_ids:
+        run, recorded = recorded_rl(registry, run_id)
+        key = (str(recorded["model"]["name"]), run.seed)
+        if key in side:
+            raise UsageError(f"two runs of {key[0]} seed {key[1]} on one side")
+        rl = recorded["rl"]
+        ops = recorded["task"].get("ops") or ALL_OPS
+        samples = int(rl["prompts_per_step"]) * int(rl["group_size"])
+        side[key] = Partner(run_id, str(recorded["algo"]["name"]), ops, samples)
+    return side
+
+
+class Reading(NamedTuple):
+    """One side of a pair: the grading read, how far its run had come, its R, its outcomes."""
+
+    step: int
+    at: float  # samples, FLOPs or seconds spent by that grading
+    rate: float
+    solved: dict[str, tuple[bool, ...]]
+
+
+def pair_readings(
+    home: Path, base: Partner, other: Partner, measure: Measure
+) -> tuple[Reading, Reading]:
+    """The base run at its last grading, the other at its grading nearest that in `measure`
+    (m4s14's loop, shared since m4s15 with report scaling)."""
+    found: list[Reading] = []
+    target: float | None = None  # the base run: at its end; the other: nearest the base's
+    for partner in (base, other):
+        try:
+            at = measured(measure, read_metrics(home, partner.run_id), partner.samples_per_step)
+            gradings = load_gradings(home, partner.run_id)
+            grading = nearest(gradings, at, max(at.values()) if target is None else target)
+            rate, _ = pooled_rate(grading, partner.ops)
+            solved = pooled_solved(grading, partner.ops)
+        except ValueError as err:
+            raise UsageError(f"{partner.run_id}: {err}") from None
+        found.append(Reading(grading.step, at[grading.step], rate, solved))
+        target = at[grading.step]
+    return found[0], found[1]
+
+
 def versus(base_ids: Sequence[str], other_ids: Sequence[str], measure: Measure) -> int:
     """`scalelab versus` (m4s14): finished RL runs of two sides paired by size and seed; each
     other run read at its grading nearest in samples, FLOPs or seconds (`measure`) to its
@@ -919,20 +966,8 @@ def versus(base_ids: Sequence[str], other_ids: Sequence[str], measure: Measure) 
     if len({*base_ids, *other_ids}) < len(base_ids) + len(other_ids):
         raise UsageError("a run is given twice: each seed counts once")
     home = scalelab_home()
-    sides: list[dict[tuple[str, int], Partner]] = []  # (size, seed) -> its run
     with registry_copy(home) as registry:
-        for run_ids in (base_ids, other_ids):
-            side: dict[tuple[str, int], Partner] = {}
-            for run_id in run_ids:
-                run, recorded = recorded_rl(registry, run_id)
-                key = (str(recorded["model"]["name"]), run.seed)
-                if key in side:
-                    raise UsageError(f"two runs of {key[0]} seed {key[1]} on one side")
-                rl = recorded["rl"]
-                ops = recorded["task"].get("ops") or ALL_OPS
-                samples = int(rl["prompts_per_step"]) * int(rl["group_size"])
-                side[key] = Partner(run_id, str(recorded["algo"]["name"]), ops, samples)
-            sides.append(side)
+        sides = [partners(registry, run_ids) for run_ids in (base_ids, other_ids)]
     base, other = sides
     if sorted(base) != sorted(other):
         raise UsageError("each run needs a partner of its size and seed on the other side")
@@ -950,25 +985,12 @@ def versus(base_ids: Sequence[str], other_ids: Sequence[str], measure: Measure) 
     print(f"{'step':>7}{unit:>10}{'R':>7}{'diff pp':>9}")
     outcomes: dict[str, tuple[list[dict[str, tuple[bool, ...]]], ...]] = {}  # size -> base, other
     for key in sorted(base):
-        found: list[tuple[int, float, float, dict[str, tuple[bool, ...]]]] = []
-        target: float | None = None  # the base run: at its end; the other: nearest the base's
-        for partner in (base[key], other[key]):
-            try:
-                at = measured(measure, read_metrics(home, partner.run_id), partner.samples_per_step)
-                gradings = load_gradings(home, partner.run_id)
-                grading = nearest(gradings, at, max(at.values()) if target is None else target)
-                rate, _ = pooled_rate(grading, partner.ops)
-                solved = pooled_solved(grading, partner.ops)
-            except ValueError as err:
-                raise UsageError(f"{partner.run_id}: {err}") from None
-            found.append((grading.step, at[grading.step], rate, solved))
-            target = at[grading.step]
-        (b_step, b_at, b_rate, b_solved), (o_step, o_at, o_rate, o_solved) = found
-        print(f"{key[0]:<6}{key[1]:>5}{b_step:>7}{b_at / scale:>10.3g}{b_rate:>7.1%}", end="")
-        print(f"{o_step:>7}{o_at / scale:>10.3g}{o_rate:>7.1%}{100 * (o_rate - b_rate):>+9.1f}")
+        b, o = pair_readings(home, base[key], other[key], measure)
+        print(f"{key[0]:<6}{key[1]:>5}{b.step:>7}{b.at / scale:>10.3g}{b.rate:>7.1%}", end="")
+        print(f"{o.step:>7}{o.at / scale:>10.3g}{o.rate:>7.1%}{100 * (o.rate - b.rate):>+9.1f}")
         pair = outcomes.setdefault(key[0], ([], []))
-        pair[0].append(b_solved)
-        pair[1].append(o_solved)
+        pair[0].append(b.solved)
+        pair[1].append(o.solved)
     for size, (base_solved, other_solved) in outcomes.items():
         try:
             gap = difference(base_solved, other_solved)
@@ -1169,6 +1191,48 @@ def bench(
 def hardware_spec(name: str) -> HardwareSpec:
     """A hardware profile by its name; cpu is this machine's CPU, as the cost model stands it in."""
     return CPU if name == "cpu" else HARDWARE[name]
+
+
+def report_scaling(run_ids: Sequence[str], out: Path) -> int:
+    """`scalelab report scaling` (m4s15): Write-up 2's figures from finished RL runs of two
+    algorithms, the first given the base: each one's family through all its sizes (joint),
+    its largest size predicted from the rest (backtest), and the second minus the first,
+    paired by size and seed, at equal samples and at equal FLOPs (versus). Records nothing."""
+    if len(set(run_ids)) < len(run_ids):
+        raise UsageError("a run is given twice: each seed counts once")
+    home = scalelab_home()
+    groups: dict[str, list[str]] = {}  # algorithm -> its runs, in the order first given
+    with registry_copy(home) as registry:
+        for run_id in run_ids:
+            _, recorded = recorded_rl(registry, run_id)
+            groups.setdefault(str(recorded["algo"]["name"]), []).append(run_id)
+    if len(groups) != 2:
+        raise UsageError(f"report scaling draws two algorithms, got {len(groups)}")
+    studies: list[scalingreport.Study] = []
+    for algo, ids in groups.items():
+        runs, names, _ = sized_runs(ids)
+        kept, _ = hold_out_largest(runs)
+        try:
+            family, held_out = fit_family(runs).family, fit_family(kept).family
+        except ValueError as err:
+            raise UsageError(f"{algo}: {err}") from None
+        studies.append(scalingreport.Study(algo, tuple(runs), names, family, held_out))
+    with registry_copy(home) as registry:
+        base, other = (partners(registry, groups[study.algo]) for study in studies)
+    if sorted(base) != sorted(other):
+        raise UsageError("each run needs a partner of its size and seed on the other side")
+    gaps: dict[str, dict[str, Interval]] = {}  # measure -> size -> other - base
+    for measure in ("samples", "flops"):
+        outcomes: dict[str, tuple[list[dict[str, tuple[bool, ...]]], ...]] = {}
+        for key in sorted(base):
+            b, o = pair_readings(home, base[key], other[key], measure)
+            pair = outcomes.setdefault(key[0], ([], []))
+            pair[0].append(b.solved)
+            pair[1].append(o.solved)
+        gaps[measure] = {size: difference(*pair) for size, pair in outcomes.items()}
+    for path in scalingreport.write_report(studies, gaps, out):
+        print(f"saved {path}")
+    return 0
 
 
 def report_cost(hardware_names: Sequence[str], out: Path) -> int:
@@ -1903,8 +1967,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     report_parser = commands.add_parser("report", help="print a report of the recorded runs")
     report_parser.add_argument(
         "report",
-        choices=["gains", "cost"],
-        help="gains: what RL did to greedy pass@1, over seeds; cost: Write-up 1's figures, tables",
+        choices=["gains", "cost", "scaling"],
+        help="gains: what RL did to greedy pass@1, over seeds; cost: Write-up 1's figures, "
+        "tables; scaling: Write-up 2's figures",
+    )
+    report_parser.add_argument(
+        "run_ids", nargs="*", help="scaling: finished RL runs of two algorithms, base first"
     )
     report_parser.add_argument(
         "--hardware", nargs="+", default=[], help="cost: the devices, each cost validated"
@@ -1913,7 +1981,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--out",
         type=Path,
         default=Path("docs/writeups/figs"),
-        help="cost: where the figures and tables go (default docs/writeups/figs)",
+        help="cost, scaling: where the figures go (default docs/writeups/figs)",
     )
 
     bench_parser = commands.add_parser(
@@ -2098,6 +2166,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return power(args.run_ids, args.effect, args.seeds)
         if args.command == "overhead":
             return overhead(args.experiment, args.overrides, args.steps, args.warmup)
+        if args.command == "report" and args.report == "scaling":
+            return report_scaling(args.run_ids, args.out)
         if args.command == "report" and args.report == "cost":
             return report_cost(args.hardware, args.out)
         if args.command == "report":

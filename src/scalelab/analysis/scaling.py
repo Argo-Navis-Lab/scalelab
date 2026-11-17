@@ -14,6 +14,7 @@ from numpy.typing import ArrayLike, NDArray
 from scipy.optimize import least_squares
 from scipy.special import expit
 
+from scalelab.analysis.stats import BOOTSTRAP_SEED, CONFIDENCE, Interval
 from scalelab.rl.gradings import Grading
 from scalelab.telemetry.sink import MetricRow
 
@@ -275,3 +276,35 @@ def fit_family(runs: Sequence[SizedRun]) -> FamilyFit:
     family = Family(*(float(value) for value in best.x))
     rmse = float(np.sqrt(np.mean(np.square(residuals(best.x)))))
     return FamilyFit(family=family, rmse=rmse, points=len(rest), sizes=len(sizes))
+
+
+def resample_seeds(runs: Sequence[SizedRun], rng: np.random.Generator) -> list[SizedRun]:
+    """One draw of the seed bootstrap (m4s12b): size by size, as many runs as that size has,
+    drawn from its own runs with replacement. Sizes never mix: every draw keeps the ladder."""
+    by_size: dict[int, list[SizedRun]] = {}
+    for run in runs:
+        by_size.setdefault(run.params, []).append(run)
+    drawn: list[SizedRun] = []
+    for _, mine in sorted(by_size.items()):
+        drawn.extend(mine[int(i)] for i in rng.integers(len(mine), size=len(mine)))
+    return drawn
+
+
+def bootstrap_families(
+    runs: Sequence[SizedRun], resamples: int, seed: int = BOOTSTRAP_SEED
+) -> list[Family]:
+    """The family refit to `resamples` draws of the seeds (resample_seeds): how far its six
+    numbers, and all that is read off them, move with which seeds happened to run. The eval
+    problems stay the same frozen set: the spread says nothing about another draw of them."""
+    if resamples < 1:
+        raise ValueError(f"resamples must be 1 or more, got {resamples}")
+    rng = np.random.default_rng(seed)
+    return [fit_family(resample_seeds(runs, rng)).family for _ in range(resamples)]
+
+
+def spread(estimate: float, values: Sequence[float]) -> Interval:
+    """The central CONFIDENCE share of bootstrap values (percentiles), around the estimate
+    the fit to all the runs gave."""
+    tail = 50 * (1 - CONFIDENCE)
+    low, high = np.percentile(values, [tail, 100 - tail])
+    return Interval(estimate=estimate, low=float(low), high=float(high))

@@ -695,3 +695,5 @@ def test_joint_needs_finished_rl_runs_of_three_sizes(
     assert "a family needs runs of 3 sizes or more, got 1" in capsys.readouterr().err
     assert main(["joint", "nope"]) == 2
     assert "no run nope in the registry" in capsys.readouterr().err
+    assert main(["joint", *runs, "--bootstrap", "-1"]) == 2  # m4s12b
+    assert "--bootstrap must be 0 (off) or more" in capsys.readouterr().err

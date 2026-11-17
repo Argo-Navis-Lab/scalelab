@@ -1,10 +1,21 @@
 """m4s12: one family of curves across sizes, fit to every run's gradings at once."""
 
+from collections import Counter
+
 import numpy as np
 import pytest
 from scipy.special import expit, logit
 
-from scalelab.analysis.scaling import N_REF, Family, Point, SizedRun, fit_family
+from scalelab.analysis.scaling import (
+    N_REF,
+    Family,
+    Point,
+    SizedRun,
+    bootstrap_families,
+    fit_family,
+    resample_seeds,
+    spread,
+)
 from scalelab.rl.experiment import geometric_steps
 
 STEPS = geometric_steps(4, 1000)  # graded as an M4 run is: 1 2 3 6 10 18 ... 562 1000
@@ -104,3 +115,37 @@ def test_r_never_leaves_0_and_1_whatever_the_family():
     curve = Family(a0=9.0, a1=5.0, c0=30.0, c1=1.0, b0=0.0, b1=0.0).curve(59_490_000, 0.07)
     assert 0.0 <= float(curve(1e30)) <= 1.0
     assert float(expit(9.0 + 5.0 * np.log10(59_490_000 / N_REF))) == pytest.approx(curve.a)
+
+
+# --- added in m4s12b: the seed bootstrap ---
+
+
+def test_a_seed_resample_draws_each_size_from_its_own_runs():
+    runs = made_up(TRUE, seeds=3, rng=np.random.default_rng(0))
+    rng = np.random.default_rng(0)
+    repeated = 0
+    for _ in range(50):
+        drawn = resample_seeds(runs, rng)
+        assert Counter(run.params for run in drawn) == Counter(run.params for run in runs)
+        assert all(any(run is mine for mine in runs) for run in drawn)  # never a new run
+        repeated += len({id(run) for run in drawn}) < len(drawn)
+    assert repeated >= 45  # with replacement: all 15 different has odds (2/9)^5, 1 in 1900
+
+
+def test_the_bootstrap_refits_reproducible_draws():
+    exact = made_up(TRUE, seeds=2)  # no noise: the 2 seeds of a size are alike
+    alike = bootstrap_families(exact, resamples=3)
+    assert len(alike) == 3 and all(family == alike[0] for family in alike)
+    noisy = made_up(TRUE, seeds=3, rng=np.random.default_rng(1))
+    first = bootstrap_families(noisy, resamples=3)
+    assert bootstrap_families(noisy, resamples=3) == first  # BOOTSTRAP_SEED fixes the draws
+    assert bootstrap_families(noisy, resamples=3, seed=1) != first
+    assert len(set(first)) == 3  # different seeds drawn, a different family each
+    with pytest.raises(ValueError, match="resamples must be 1 or more, got 0"):
+        bootstrap_families(noisy, resamples=0)
+
+
+def test_spread_is_the_central_95_percent():
+    found = spread(50.0, [float(v) for v in range(101)])
+    assert found.estimate == 50.0
+    assert (found.low, found.high) == pytest.approx((2.5, 97.5))  # 2.5000000000000002

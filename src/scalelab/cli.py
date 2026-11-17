@@ -27,18 +27,23 @@ from scalelab.analysis.costreport import load_measurements, write_report
 from scalelab.analysis.reports import gains
 from scalelab.analysis.scaling import (
     ALL_OPS,
+    FAMILY_PARAMETERS,
     N_REF,
     NEAR,
+    Family,
     SizedRun,
+    bootstrap_families,
     cumulative_compute,
     fit_family,
     fit_run,
     pooled_rate,
     run_points,
+    spread,
     step_reaching,
 )
 from scalelab.analysis.stats import (
     ALPHA,
+    CONFIDENCE,
     EFFECT,
     POWER,
     SEEDS,
@@ -723,11 +728,14 @@ def fit(run_ids: Sequence[str]) -> int:
     return 0
 
 
-def joint(run_ids: Sequence[str]) -> int:
+def joint(run_ids: Sequence[str], resamples: int = 0) -> int:
     """`scalelab joint` (m4s12): one family of curves through finished RL runs of three sizes
     or more, every run's gradings fit at once (analysis/scaling.py fit_family): A, C_mid and B
     as lines in log N, each run's R_0 its own step 0's. Prints the family and, size by size,
-    its curve next to the runs' last gradings. Records nothing."""
+    its curve next to the runs' last gradings. With `resamples` (m4s12b), the seed
+    bootstrap's intervals too. Records nothing."""
+    if resamples < 0:
+        raise UsageError("--bootstrap must be 0 (off) or more")
     if len(set(run_ids)) < len(run_ids):
         raise UsageError("a run is given twice: each seed counts once")
     home = scalelab_home()
@@ -786,6 +794,33 @@ def joint(run_ids: Sequence[str]) -> int:
             end="",
         )
         print(f"{curve.c_mid:>10.3g}{curve.b:>6.2f}{rms:>8.2f}{last:>8.1%}{fitted:>8.1%}")
+    if resamples == 0:
+        return 0
+
+    def read_off(fam: Family, params: int) -> tuple[float, float, float]:
+        """A size's A, log10 C_mid and fitted R at its runs' last C, as the table has them."""
+        mine = [run for run in runs if run.params == params]
+        curve = fam.curve(params, statistics.mean(run.points[0].rate for run in mine))
+        fitted = statistics.mean(float(curve(run.points[-1].compute)) for run in mine)
+        return curve.a, math.log10(curve.c_mid), fitted
+
+    families = bootstrap_families(runs, resamples)
+    print(f"seeds:         {resamples} resamples, each size's runs drawn again with replacement")
+    print(f"               and the family refit; {CONFIDENCE:.0%} intervals")
+    for name in FAMILY_PARAMETERS:
+        shown = spread(getattr(family, name), [getattr(fam, name) for fam in families])
+        print(f"{name:<6}{shown.estimate:>9.3f}  [{shown.low:.3f}, {shown.high:.3f}]")
+    print(f"{'size':<6}{'A':<26}{'log10 C_mid':<26}R at the last C")
+    for params in sorted(names):
+        here = read_off(family, params)
+        drawn = [read_off(fam, params) for fam in families]
+        a, c_mid, r = (spread(here[k], [values[k] for values in drawn]) for k in range(3))
+        cells = [
+            f"{a.estimate:.1%} [{a.low:.1%}, {a.high:.1%}]",
+            f"{c_mid.estimate:.2f} [{c_mid.low:.2f}, {c_mid.high:.2f}]",
+            f"{r.estimate:.1%} [{r.low:.1%}, {r.high:.1%}]",
+        ]
+        print(f"{names[params]:<6}{cells[0]:<26}{cells[1]:<26}{cells[2]}")
     return 0
 
 
@@ -1656,6 +1691,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         "joint", help="one family of sigmoid curves through RL runs of several sizes"
     )
     joint_parser.add_argument("run_ids", nargs="+", help="finished RL runs of 3 sizes or more")
+    joint_parser.add_argument(
+        "--bootstrap",
+        type=int,
+        default=0,
+        metavar="N",
+        help="intervals from N refits on resampled seeds (200: about 2 minutes at 25 runs)",
+    )
     power_parser = commands.add_parser(
         "power", help="final R's spread across seeds, and the power it leaves a comparison"
     )
@@ -1866,7 +1908,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "fit":
             return fit(args.run_ids)
         if args.command == "joint":
-            return joint(args.run_ids)
+            return joint(args.run_ids, args.bootstrap)
         if args.command == "power":
             return power(args.run_ids, args.effect, args.seeds)
         if args.command == "overhead":

@@ -25,6 +25,7 @@ import yaml
 from scalelab.analysis import scalingreport
 from scalelab.analysis.bands import CEILING, FLOOR, pick_bands
 from scalelab.analysis.costreport import load_measurements, write_report
+from scalelab.analysis.export import ExportError, export_runs
 from scalelab.analysis.reports import gains
 from scalelab.analysis.scaling import (
     ALL_OPS,
@@ -1193,6 +1194,37 @@ def hardware_spec(name: str) -> HardwareSpec:
     return CPU if name == "cpu" else HARDWARE[name]
 
 
+def export(run_ids: Sequence[str], out: Path) -> int:
+    """`scalelab export RUN... --out DIR` (m4s17): finished runs, with the warm starts the RL
+    ones start from, copied into DIR as a home of their own (registry.db, gradings/, metrics/,
+    manifest.json), machine details left out; refused if any remain. Changes nothing in home."""
+    if len(set(run_ids)) < len(run_ids):
+        raise UsageError("a run is given twice")
+    home = scalelab_home()
+    with registry_copy(home) as registry:
+        chosen = list(run_ids)
+        for run_id in run_ids:
+            run = registry.get_run(run_id)
+            if run is None:
+                raise UsageError(f"no run {run_id} in the registry")
+            if run.status != "done":
+                raise UsageError(f"{run_id} is {run.status}: only finished runs are exported")
+            config_json = registry.experiment_json(run.config_hash)
+            assert config_json is not None  # every run row points at an experiment row
+            start = (json.loads(config_json).get("rl") or {}).get("from_run")
+            if start is not None and start not in chosen and registry.get_run(start) is not None:
+                chosen.append(start)  # its R_0's model comes along
+        try:
+            exported = export_runs(home, registry, chosen, out)
+        except ExportError as err:
+            raise UsageError(str(err)) from None
+    starts = len(chosen) - len(run_ids)
+    print(f"exported {exported.runs} runs ({len(run_ids)} given, {starts} warm starts)")
+    print(f"{exported.files} files, {exported.size / 1e6:.1f} MB, no machine details: {out}")
+    print(f"manifest: {out / 'manifest.json'}")
+    return 0
+
+
 def report_scaling(run_ids: Sequence[str], out: Path) -> int:
     """`scalelab report scaling` (m4s15): Write-up 2's figures from finished RL runs of two
     algorithms, the first given the base: each one's family through all its sizes (joint),
@@ -1943,6 +1975,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="samples",
         help="what is held equal (default samples: completions sampled)",
     )
+    export_parser = commands.add_parser(
+        "export", help="finished runs and their files as a dataset, machine details left out"
+    )
+    export_parser.add_argument("run_ids", nargs="+", help="finished runs")
+    export_parser.add_argument(
+        "--out", type=Path, required=True, help="a new or empty folder (a home of its own)"
+    )
     power_parser = commands.add_parser(
         "power", help="final R's spread across seeds, and the power it leaves a comparison"
     )
@@ -2162,6 +2201,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return backtest(args.run_ids, args.bootstrap)
         if args.command == "versus":
             return versus(args.run_ids, args.against, args.at)
+        if args.command == "export":
+            return export(args.run_ids, args.out)
         if args.command == "power":
             return power(args.run_ids, args.effect, args.seeds)
         if args.command == "overhead":

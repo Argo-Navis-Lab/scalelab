@@ -10,6 +10,7 @@ from typing import Literal
 from sqlalchemy import (
     Boolean,
     Column,
+    ColumnElement,
     DateTime,
     Engine,
     Float,
@@ -131,6 +132,9 @@ jobs = Table(  # m4s5: the work queue
     Column("lease_expires_at", DateTime(timezone=True)),  # empty unless leased or running
     Column("attempts", Integer, nullable=False),  # how many times it was leased
 )
+
+# The RuntimeConfig fields that name the machine a run ran on (m4s17): left out of exports.
+MACHINE_FIELDS = ("output_dir", "worker_name", "local_registry")
 
 
 class RunRecord(StrictModel):
@@ -447,6 +451,43 @@ class Registry:
             return conn.execute(
                 select(experiments.c.config_json).where(experiments.c.config_hash == config_hash)
             ).scalar()
+
+    # --- export (m4s17) -------------------------------------------------------------------
+
+    def export_runs(self, run_ids: Sequence[str], target: "Registry") -> None:
+        """Copy these runs into `target`, a new registry: their rows in runs, evals, anomalies
+        and runtimes, their experiments, and the jobs that ran them with their sweeps. What
+        names a machine stays behind: each runtime's MACHINE_FIELDS go back to their defaults,
+        each job's lease owner (a host name and a process id) to empty."""
+        wanted = list(run_ids)
+        defaults = RuntimeConfig()
+        with self.engine.connect() as source, target.engine.begin() as conn:
+
+            def copy(table: Table, where: ColumnElement[bool]) -> None:
+                rows = [dict(row) for row in source.execute(select(table).where(where)).mappings()]
+                if table is runtimes:
+                    for row in rows:
+                        runtime = RuntimeConfig.model_validate_json(str(row["runtime_json"]))
+                        update = {name: getattr(defaults, name) for name in MACHINE_FIELDS}
+                        row["runtime_json"] = runtime.model_copy(update=update).model_dump_json()
+                if table is jobs:
+                    for row in rows:
+                        row["lease_owner"] = None
+                if rows:
+                    conn.execute(insert(table), rows)
+
+            run_rows = source.execute(select(runs).where(runs.c.run_id.in_(wanted))).mappings()
+            hashes = {row["config_hash"] for row in run_rows}
+            sweep_ids = source.execute(
+                select(jobs.c.sweep_id).where(jobs.c.run_id.in_(wanted)).distinct()
+            ).scalars()
+            copy(experiments, experiments.c.config_hash.in_(hashes))  # parents first
+            copy(runs, runs.c.run_id.in_(wanted))
+            copy(evals, evals.c.run_id.in_(wanted))
+            copy(anomalies, anomalies.c.run_id.in_(wanted))
+            copy(runtimes, runtimes.c.run_id.in_(wanted))
+            copy(sweeps, sweeps.c.sweep_id.in_(list(sweep_ids)))
+            copy(jobs, jobs.c.run_id.in_(wanted))
 
     # --- the work queue (m4s5; phase 1: SQLite, one worker at a time) ---------------------
 

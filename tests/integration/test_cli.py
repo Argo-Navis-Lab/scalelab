@@ -697,3 +697,25 @@ def test_joint_needs_finished_rl_runs_of_three_sizes(
     assert "no run nope in the registry" in capsys.readouterr().err
     assert main(["joint", *runs, "--bootstrap", "-1"]) == 2  # m4s12b
     assert "--bootstrap must be 0 (off) or more" in capsys.readouterr().err
+
+
+# --- added in m4s13: the backtest ---
+
+
+def test_backtest_needs_three_sizes_left_after_the_largest(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    warm_start = warm_started(home)
+    rl = [*SMALL_RL, "rl.flops=3e10", f"rl.from_run={warm_start}"]  # 3 steps or more
+    assert main(["run", str(RL), *rl]) == 0
+    registry = Registry.sqlite(home / "registry.db")
+    (run,) = [row.run_id for row in registry.list_runs() if row.run_id != warm_start]
+    capsys.readouterr()
+    assert main(["backtest", run]) == 2  # one size, held out: none left to fit
+    assert "the sizes left to fit: a family needs runs of 3 sizes or more, got 0" in (
+        capsys.readouterr().err
+    )
+    assert main(["backtest", warm_start]) == 2
+    assert "is a warm start: only RL runs have a curve" in capsys.readouterr().err
+    assert main(["backtest", run, "--bootstrap", "-1"]) == 2
+    assert "--bootstrap must be 0 (off) or more" in capsys.readouterr().err

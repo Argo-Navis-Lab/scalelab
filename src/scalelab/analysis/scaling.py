@@ -308,3 +308,20 @@ def spread(estimate: float, values: Sequence[float]) -> Interval:
     tail = 50 * (1 - CONFIDENCE)
     low, high = np.percentile(values, [tail, 100 - tail])
     return Interval(estimate=estimate, low=float(low), high=float(high))
+
+
+def hold_out_largest(runs: Sequence[SizedRun]) -> tuple[list[SizedRun], list[SizedRun]]:
+    """A backtest's split (m4s13): the runs of every size but the largest, to fit, and the
+    largest size's runs, to predict, as a forecast past the ladder's top would have to."""
+    if not runs:
+        raise ValueError("a backtest needs runs")
+    largest = max(run.params for run in runs)
+    kept = [run for run in runs if run.params != largest]
+    return kept, [run for run in runs if run.params == largest]
+
+
+def predict_run(family: Family, run: SizedRun) -> list[float]:
+    """The family's R at each of a run's gradings after step 0, its curve drawn from the
+    run's size and its own step-0 R: all a prediction can know before RL starts."""
+    curve = family.curve(run.params, run.points[0].rate)
+    return [float(curve(point.compute)) for point in run.points[1:]]

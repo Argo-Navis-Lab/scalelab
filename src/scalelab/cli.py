@@ -36,7 +36,9 @@ from scalelab.analysis.scaling import (
     cumulative_compute,
     fit_family,
     fit_run,
+    hold_out_largest,
     pooled_rate,
+    predict_run,
     run_points,
     spread,
     step_reaching,
@@ -728,14 +730,10 @@ def fit(run_ids: Sequence[str]) -> int:
     return 0
 
 
-def joint(run_ids: Sequence[str], resamples: int = 0) -> int:
-    """`scalelab joint` (m4s12): one family of curves through finished RL runs of three sizes
-    or more, every run's gradings fit at once (analysis/scaling.py fit_family): A, C_mid and B
-    as lines in log N, each run's R_0 its own step 0's. Prints the family and, size by size,
-    its curve next to the runs' last gradings. With `resamples` (m4s12b), the seed
-    bootstrap's intervals too. Records nothing."""
-    if resamples < 0:
-        raise UsageError("--bootstrap must be 0 (off) or more")
+def sized_runs(run_ids: Sequence[str]) -> tuple[list[SizedRun], dict[int, str], str]:
+    """Finished RL runs as SizedRuns (m4s13: shared by `joint` and `backtest`), each size's
+    name by its N, and the operations they all grade. Refuses repeats, unknown, unfinished
+    and warm-start runs, and runs that grade different operations."""
     if len(set(run_ids)) < len(run_ids):
         raise UsageError("a run is given twice: each seed counts once")
     home = scalelab_home()
@@ -766,12 +764,24 @@ def joint(run_ids: Sequence[str], resamples: int = 0) -> int:
         except ValueError as err:
             raise UsageError(f"{run_id}: {err}") from None
         runs.append(SizedRun(params=params, points=tuple(points)))
+    return runs, names, found[0][1]
+
+
+def joint(run_ids: Sequence[str], resamples: int = 0) -> int:
+    """`scalelab joint` (m4s12): one family of curves through finished RL runs of three sizes
+    or more, every run's gradings fit at once (analysis/scaling.py fit_family): A, C_mid and B
+    as lines in log N, each run's R_0 its own step 0's. Prints the family and, size by size,
+    its curve next to the runs' last gradings. With `resamples` (m4s12b), the seed
+    bootstrap's intervals too. Records nothing."""
+    if resamples < 0:
+        raise UsageError("--bootstrap must be 0 (off) or more")
+    runs, names, ops = sized_runs(run_ids)
     try:
         result = fit_family(runs)
     except ValueError as err:
         raise UsageError(str(err)) from None
     family = result.family
-    print(f"runs:          {len(runs)} of {result.sizes} sizes; R = greedy pass@1 on {found[0][1]}")
+    print(f"runs:          {len(runs)} of {result.sizes} sizes; R = greedy pass@1 on {ops}")
     print("family:        logit A = a0 + a1 x, ln C_mid = c0 + c1 x, ln B = b0 + b1 x,")
     print(f"               x = log10(N / {N_REF:g})")
     print(f"fit:           a0 {family.a0:.3f}  a1 {family.a1:.3f}  c0 {family.c0:.3f}", end="")
@@ -821,6 +831,56 @@ def joint(run_ids: Sequence[str], resamples: int = 0) -> int:
             f"{r.estimate:.1%} [{r.low:.1%}, {r.high:.1%}]",
         ]
         print(f"{names[params]:<6}{cells[0]:<26}{cells[1]:<26}{cells[2]}")
+    return 0
+
+
+def backtest(run_ids: Sequence[str], resamples: int = 0) -> int:
+    """`scalelab backtest` (m4s13): the family (fit_family) fit to every size but the largest,
+    then the largest size's runs predicted from their step-0 R alone and set beside what they
+    measured, grading by grading. With `resamples`, the seed bootstrap of the fitted sizes'
+    runs, and whether the measured R at the last C falls in its interval. Records nothing."""
+    if resamples < 0:
+        raise UsageError("--bootstrap must be 0 (off) or more")
+    runs, names, ops = sized_runs(run_ids)
+    kept, held = hold_out_largest(runs)
+    try:
+        result = fit_family(kept)
+    except ValueError as err:
+        raise UsageError(f"the sizes left to fit: {err}") from None
+    sizes = " ".join(names[params] for params in sorted({run.params for run in kept}))
+    print(f"fit on:        {sizes} ({len(kept)} runs); R = greedy pass@1 on {ops}")
+    print(f"held out:      {names[held[0].params]} ({len(held)} runs), predicted from R_0 alone")
+    rows: dict[str, list[tuple[float, float, float]]] = {}  # step -> (C, measured, predicted)
+    for run in held:
+        guesses = predict_run(result.family, run)
+        for k, (point, guess) in enumerate(zip(run.points[1:], guesses, strict=True)):
+            step = "last" if k == len(guesses) - 1 else str(point.step)  # runs end apart
+            rows.setdefault(step, []).append((point.compute, point.rate, guess))
+    misses = [guess - rate for found in rows.values() for _, rate, guess in found]
+    rms = 100 * statistics.fmean(miss * miss for miss in misses) ** 0.5
+    bias = 100 * statistics.fmean(misses)
+    print(f"residuals:     fit {100 * result.rmse:.2f} pp rms over {result.points} gradings")
+    print(f"held out:      {rms:.2f} pp rms over {len(misses)} gradings, bias {bias:+.2f} pp")
+    print(f"{'step':>6}{'C':>10}{'measured':>10}{'predicted':>11}{'miss pp':>9}")
+    for step in sorted(rows, key=lambda step: math.inf if step == "last" else int(step)):
+        c, measured, predicted = (statistics.fmean(row[k] for row in rows[step]) for k in range(3))
+        print(f"{step:>6}{c:>10.3g}{measured:>10.1%}{predicted:>11.1%}", end="")
+        print(f"{100 * (predicted - measured):>+9.1f}")  # a mean over the held-out runs
+    if resamples == 0:
+        return 0
+
+    def at_last(family: Family) -> float:
+        """The family's R at each held-out run's last C, averaged over the runs."""
+        return statistics.fmean(predict_run(family, run)[-1] for run in held)
+
+    families = bootstrap_families(kept, resamples)
+    shown = spread(at_last(result.family), [at_last(family) for family in families])
+    measured = statistics.fmean(run.points[-1].rate for run in held)
+    verdict = "inside" if shown.low <= measured <= shown.high else "OUTSIDE"
+    interval = f"[{shown.low:.1%}, {shown.high:.1%}]"
+    print(f"seeds:         {resamples} resamples of the fitted sizes' runs, {CONFIDENCE:.0%}")
+    print(f"last C:        predicted {shown.estimate:.1%} {interval}", end="")
+    print(f", measured {measured:.1%}: {verdict}")
     return 0
 
 
@@ -1698,6 +1758,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         metavar="N",
         help="intervals from N refits on resampled seeds (200: about 2 minutes at 25 runs)",
     )
+    backtest_parser = commands.add_parser(
+        "backtest", help="fit the family without the largest size, then predict that size"
+    )
+    backtest_parser.add_argument("run_ids", nargs="+", help="finished RL runs of 4 sizes or more")
+    backtest_parser.add_argument(
+        "--bootstrap",
+        type=int,
+        default=0,
+        metavar="N",
+        help="the prediction's interval from N refits on resampled seeds of the fitted sizes",
+    )
     power_parser = commands.add_parser(
         "power", help="final R's spread across seeds, and the power it leaves a comparison"
     )
@@ -1909,6 +1980,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return fit(args.run_ids)
         if args.command == "joint":
             return joint(args.run_ids, args.bootstrap)
+        if args.command == "backtest":
+            return backtest(args.run_ids, args.bootstrap)
         if args.command == "power":
             return power(args.run_ids, args.effect, args.seeds)
         if args.command == "overhead":

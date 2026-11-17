@@ -13,6 +13,8 @@ from scalelab.analysis.scaling import (
     SizedRun,
     bootstrap_families,
     fit_family,
+    hold_out_largest,
+    predict_run,
     resample_seeds,
     spread,
 )
@@ -149,3 +151,31 @@ def test_spread_is_the_central_95_percent():
     found = spread(50.0, [float(v) for v in range(101)])
     assert found.estimate == 50.0
     assert (found.low, found.high) == pytest.approx((2.5, 97.5))  # 2.5000000000000002
+
+
+# --- added in m4s13: the backtest ---
+
+
+def test_a_backtest_holds_out_the_largest_size():
+    runs = made_up(TRUE, seeds=2)
+    kept, held = hold_out_largest(runs)
+    assert Counter(run.params for run in held) == {59_490_000: 2}
+    assert Counter(run.params for run in kept) == {n: 2 for n in list(LADDER)[:4]}
+    with pytest.raises(ValueError, match="a backtest needs runs"):
+        hold_out_largest([])
+
+
+def test_a_prediction_starts_from_the_runs_own_r0():
+    run = made_up(TRUE, seeds=1)[-1]
+    curve = TRUE.curve(run.params, run.points[0].rate)
+    predicted = predict_run(TRUE, run)
+    assert len(predicted) == len(run.points) - 1  # step 0 is measured, not predicted
+    assert predicted == [float(curve(point.compute)) for point in run.points[1:]]
+
+
+def test_four_sizes_predict_the_fifth_when_the_family_is_true():
+    kept, held = hold_out_largest(made_up(TRUE, seeds=1))
+    family = fit_family(kept).family
+    for run in held:
+        measured = [point.rate for point in run.points[1:]]
+        assert predict_run(family, run) == pytest.approx(measured, abs=1e-3)

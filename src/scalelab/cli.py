@@ -53,6 +53,7 @@ from scalelab.analysis.stats import (
     detection_power,
     seeds_for_power,
 )
+from scalelab.analysis.versus import MEASURES, Measure, difference, measured, nearest, pooled_solved
 from scalelab.bench.comms import SIZES, Backend, bench_collectives
 from scalelab.bench.suites import (
     HALF_SUITES,
@@ -881,6 +882,102 @@ def backtest(run_ids: Sequence[str], resamples: int = 0) -> int:
     print(f"seeds:         {resamples} resamples of the fitted sizes' runs, {CONFIDENCE:.0%}")
     print(f"last C:        predicted {shown.estimate:.1%} {interval}", end="")
     print(f", measured {measured:.1%}: {verdict}")
+    return 0
+
+
+def recorded_rl(registry: Registry, run_id: str) -> tuple[RunRecord, dict[str, Any]]:
+    """A finished RL run's row and its config, read raw (m4s14: `versus`). Refuses unknown,
+    unfinished and warm-start runs."""
+    run = registry.get_run(run_id)
+    if run is None:
+        raise UsageError(f"no run {run_id} in the registry")
+    if run.status != "done":
+        raise UsageError(f"{run_id} is {run.status}: only finished runs are compared")
+    config_json = registry.experiment_json(run.config_hash)
+    assert config_json is not None  # every run row points at an experiment row
+    recorded = json.loads(config_json)  # read raw, as old runs' configs may not load
+    if recorded.get("rl") is None:
+        raise UsageError(f"{run_id} is a warm start: only RL runs are compared")
+    return run, recorded
+
+
+class Partner(NamedTuple):
+    """One run of one side of `versus` (m4s14)."""
+
+    run_id: str
+    algo: str
+    ops: str
+    samples_per_step: int  # completions sampled a step: prompts_per_step x group_size
+
+
+def versus(base_ids: Sequence[str], other_ids: Sequence[str], measure: Measure) -> int:
+    """`scalelab versus` (m4s14): finished RL runs of two sides paired by size and seed; each
+    other run read at its grading nearest in samples, FLOPs or seconds (`measure`) to its
+    base partner at the partner's last grading (analysis/versus.py). Prints each pair's
+    R and, size by size, the difference other - base, paired by seed and problem, with its
+    95% interval. Records nothing."""
+    if len({*base_ids, *other_ids}) < len(base_ids) + len(other_ids):
+        raise UsageError("a run is given twice: each seed counts once")
+    home = scalelab_home()
+    sides: list[dict[tuple[str, int], Partner]] = []  # (size, seed) -> its run
+    with registry_copy(home) as registry:
+        for run_ids in (base_ids, other_ids):
+            side: dict[tuple[str, int], Partner] = {}
+            for run_id in run_ids:
+                run, recorded = recorded_rl(registry, run_id)
+                key = (str(recorded["model"]["name"]), run.seed)
+                if key in side:
+                    raise UsageError(f"two runs of {key[0]} seed {key[1]} on one side")
+                rl = recorded["rl"]
+                ops = recorded["task"].get("ops") or ALL_OPS
+                samples = int(rl["prompts_per_step"]) * int(rl["group_size"])
+                side[key] = Partner(run_id, str(recorded["algo"]["name"]), ops, samples)
+            sides.append(side)
+    base, other = sides
+    if sorted(base) != sorted(other):
+        raise UsageError("each run needs a partner of its size and seed on the other side")
+    ops_found = {partner.ops for side in sides for partner in side.values()}
+    if len(ops_found) > 1:
+        raise UsageError("the runs grade different operations: one R for both sides")
+    names = [" ".join(sorted({p.algo for p in side.values()})) for side in sides]
+    unit = "hours" if measure == "seconds" else measure
+    scale = 3600.0 if measure == "seconds" else 1.0
+    print(f"base:          {names[0]} ({len(base)} runs); other: {names[1]} ({len(other)} runs)")
+    print(f"matched:       each other run at its grading nearest in {measure} to its base")
+    print("               partner (same size and seed) at the partner's last grading")
+    print(f"R:             greedy pass@1 on {ops_found.pop()} problems, pooled")
+    print(f"{'size':<6}{'seed':>5}{'step':>7}{unit:>10}{'R':>7}", end="")
+    print(f"{'step':>7}{unit:>10}{'R':>7}{'diff pp':>9}")
+    outcomes: dict[str, tuple[list[dict[str, tuple[bool, ...]]], ...]] = {}  # size -> base, other
+    for key in sorted(base):
+        found: list[tuple[int, float, float, dict[str, tuple[bool, ...]]]] = []
+        target: float | None = None  # the base run: at its end; the other: nearest the base's
+        for partner in (base[key], other[key]):
+            try:
+                at = measured(measure, read_metrics(home, partner.run_id), partner.samples_per_step)
+                gradings = load_gradings(home, partner.run_id)
+                grading = nearest(gradings, at, max(at.values()) if target is None else target)
+                rate, _ = pooled_rate(grading, partner.ops)
+                solved = pooled_solved(grading, partner.ops)
+            except ValueError as err:
+                raise UsageError(f"{partner.run_id}: {err}") from None
+            found.append((grading.step, at[grading.step], rate, solved))
+            target = at[grading.step]
+        (b_step, b_at, b_rate, b_solved), (o_step, o_at, o_rate, o_solved) = found
+        print(f"{key[0]:<6}{key[1]:>5}{b_step:>7}{b_at / scale:>10.3g}{b_rate:>7.1%}", end="")
+        print(f"{o_step:>7}{o_at / scale:>10.3g}{o_rate:>7.1%}{100 * (o_rate - b_rate):>+9.1f}")
+        pair = outcomes.setdefault(key[0], ([], []))
+        pair[0].append(b_solved)
+        pair[1].append(o_solved)
+    for size, (base_solved, other_solved) in outcomes.items():
+        try:
+            gap = difference(base_solved, other_solved)
+        except ValueError as err:
+            raise UsageError(f"{size}: {err}") from None
+        problems = sum(len(outcome) for outcome in base_solved[0].values())
+        print(f"{size}: other - base {100 * gap.estimate:+.2f} pp", end="")
+        print(f" [{100 * gap.low:+.2f}, {100 * gap.high:+.2f}], {len(base_solved)} seeds", end="")
+        print(f" x {problems} problems, {CONFIDENCE:.0%}")
     return 0
 
 
@@ -1769,6 +1866,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         metavar="N",
         help="the prediction's interval from N refits on resampled seeds of the fitted sizes",
     )
+    versus_parser = commands.add_parser(
+        "versus", help="two sides' RL runs, paired by size and seed, at equal samples or hours"
+    )
+    versus_parser.add_argument("run_ids", nargs="+", help="the base side's finished RL runs")
+    versus_parser.add_argument(
+        "--against", nargs="+", required=True, metavar="RUN", help="the other side's runs"
+    )
+    versus_parser.add_argument(
+        "--at",
+        choices=MEASURES,
+        default="samples",
+        help="what is held equal (default samples: completions sampled)",
+    )
     power_parser = commands.add_parser(
         "power", help="final R's spread across seeds, and the power it leaves a comparison"
     )
@@ -1982,6 +2092,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return joint(args.run_ids, args.bootstrap)
         if args.command == "backtest":
             return backtest(args.run_ids, args.bootstrap)
+        if args.command == "versus":
+            return versus(args.run_ids, args.against, args.at)
         if args.command == "power":
             return power(args.run_ids, args.effect, args.seeds)
         if args.command == "overhead":

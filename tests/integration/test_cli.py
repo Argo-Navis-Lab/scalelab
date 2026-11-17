@@ -719,3 +719,41 @@ def test_backtest_needs_three_sizes_left_after_the_largest(
     assert "is a warm start: only RL runs have a curve" in capsys.readouterr().err
     assert main(["backtest", run, "--bootstrap", "-1"]) == 2
     assert "--bootstrap must be 0 (off) or more" in capsys.readouterr().err
+
+
+# --- added in m4s14: two algorithms at equal samples, FLOPs or hours ---
+
+
+def test_versus_pairs_runs_by_size_and_seed_and_prints_the_difference(
+    home: Path, capsys: pytest.CaptureFixture[str]
+):
+    warm_start = warm_started(home)
+    registry = Registry.sqlite(home / "registry.db")
+
+    def ran(*overrides: str) -> str:
+        """The run one more `scalelab run` adds."""
+        before = {run.run_id for run in registry.list_runs()}
+        assert main(["run", str(RL), *SMALL_RL, f"rl.from_run={warm_start}", *overrides]) == 0
+        (run_id,) = {run.run_id for run in registry.list_runs()} - before
+        return run_id
+
+    grpo, rloo, seed1 = ran(), ran("algo=rloo"), ran("seed=1")
+    capsys.readouterr()
+    assert main(["versus", grpo, "--against", rloo]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "base:          grpo (1 runs); other: rloo (1 runs)"
+    assert lines[1].startswith("matched:       each other run at its grading nearest in samples")
+    assert lines[3] == "R:             greedy pass@1 on +-* problems, pooled"
+    row = lines[5].split()
+    assert row[:2] == ["m1", "0"] and row[2] == row[5]  # both sample the same a step
+    assert lines[6].startswith("m1: other - base ") and lines[6].endswith(", 95%")
+    assert main(["versus", grpo, "--against", rloo, "--at", "seconds"]) == 0
+    assert capsys.readouterr().out.splitlines()[4].split()[3] == "hours"
+    assert main(["versus", grpo, "--against", grpo]) == 2
+    assert "a run is given twice" in capsys.readouterr().err
+    assert main(["versus", grpo, "--against", seed1]) == 2
+    assert "each run needs a partner of its size and seed" in capsys.readouterr().err
+    assert main(["versus", grpo, rloo, "--against", seed1]) == 2
+    assert "two runs of m1 seed 0 on one side" in capsys.readouterr().err
+    assert main(["versus", grpo, "--against", warm_start]) == 2
+    assert "is a warm start: only RL runs are compared" in capsys.readouterr().err

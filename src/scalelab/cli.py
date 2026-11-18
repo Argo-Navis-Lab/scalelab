@@ -1197,7 +1197,8 @@ def hardware_spec(name: str) -> HardwareSpec:
 def export(run_ids: Sequence[str], out: Path) -> int:
     """`scalelab export RUN... --out DIR` (m4s17): finished runs, with the warm starts the RL
     ones start from, copied into DIR as a home of their own (registry.db, gradings/, metrics/,
-    manifest.json), machine details left out; refused if any remain. Changes nothing in home."""
+    runs.csv, README.md, manifest.json), machine details left out; refused if any remain.
+    Changes nothing in home."""
     if len(set(run_ids)) < len(run_ids):
         raise UsageError("a run is given twice")
     home = scalelab_home()

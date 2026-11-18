@@ -13,6 +13,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from scalelab.analysis.datacard import write_card
 from scalelab.core.registry import Registry
 from scalelab.core.storage import atomic_write_json, registry_path
 from scalelab.rl.gradings import gradings_folder
@@ -71,20 +72,21 @@ def sha256(path: Path) -> str:
 
 def export_runs(home: Path, registry: Registry, run_ids: Sequence[str], out: Path) -> Exported:
     """Copy runs from `registry` (home's, or a copy of it) and their files under `home` into
-    `out`, a new or empty folder: registry.db, gradings/, metrics/ and a manifest of every
-    file's sha256. Then search every file for leaks(); finding one deletes `out` again and
-    raises ExportError."""
+    `out`, a new or empty folder: registry.db, gradings/, metrics/, runs.csv, README.md and a
+    manifest of every file's sha256. Then search every file for leaks(); finding one deletes
+    `out` again and raises ExportError."""
     if out.exists() and any(out.iterdir()):
         raise ExportError(f"{out} is not empty: export into a new folder")
     out.mkdir(parents=True, exist_ok=True)
     try:
         target = Registry.sqlite(registry_path(out))
         registry.export_runs(run_ids, target)
-        target.engine.dispose()  # closes the file before it is searched and hashed
         for run_id in run_ids:
             for folder in (gradings_folder, metrics_folder):
                 if folder(home, run_id).is_dir():
                     shutil.copytree(folder(home, run_id), folder(out, run_id))
+                    write_card(out, target)  # m4s18: runs.csv and README.md, searched like the rest
+        target.engine.dispose()  # closes the file before it is searched and hashed
         files = sorted(path for path in out.rglob("*") if path.is_file())
         names = machine_names()
         found = [

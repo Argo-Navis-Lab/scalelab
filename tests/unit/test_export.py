@@ -1,5 +1,6 @@
 """scalelab export (m4s17): runs copied as a dataset, with nothing that names a machine."""
 
+import csv
 import json
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from scalelab.analysis.datacard import CARD, RUNS_CSV, RunRow, counts_table
 from scalelab.analysis.export import (
     MANIFEST,
     ExportError,
@@ -115,7 +117,7 @@ def test_export_copies_the_runs_without_machine_details(home: Path, tmp_path: Pa
     assert runtime == RuntimeConfig(precision="fp16")  # the machine's fields back to defaults
     assert [job.lease_owner for job in copy.list_jobs("main-0123abcd")] == [None]
     assert exported.runs == 1
-    assert exported.files == 3  # registry.db, the grading, the metrics part
+    assert exported.files == 5  # registry.db, the grading, the metrics part, runs.csv, README.md
     manifest = json.loads((out / MANIFEST).read_text())
     assert manifest["runs"] == [run_id]
     grading = f"gradings/{run_id}/grading-000000000.json"
@@ -154,3 +156,34 @@ def test_the_command_checks_its_runs_then_exports(
     printed = capsys.readouterr().out
     assert "exported 1 runs (1 given, 0 warm starts)" in printed
     assert (out / MANIFEST).is_file()
+
+
+def test_export_writes_the_runs_index_and_the_card(home: Path, tmp_path: Path) -> None:
+    out = tmp_path / "dataset"
+    run_id = first_run(home)
+    export_runs(home, Registry.sqlite(registry_path(home)), [run_id], out)
+    with (out / RUNS_CSV).open() as file:
+        rows = list(csv.DictReader(file))
+    assert [(r["run_id"], r["kind"], r["algo"], r["seed"]) for r in rows] == [
+        (run_id, "warmstart", "", "0")
+    ]
+    assert (rows[0]["last_step"], rows[0]["gradings"]) == ("0", "1")
+    card = (out / CARD).read_text()
+    assert card.startswith("---\nlicense: cc-by-4.0\n")  # the Hub reads this header
+    assert "1 finished training runs" in card
+    assert {RUNS_CSV, CARD} <= set(json.loads((out / MANIFEST).read_text())["files"])
+
+
+def row(model: str, algo: str, seed: int) -> RunRow:
+    return RunRow("id", "rl" if algo else "warmstart", model, algo, seed, "", "sha", "t4", 0, 0)
+
+
+def test_counts_table_counts_runs_by_algorithm_and_model() -> None:
+    rows = [row("m1", "", 0), row("m1", "grpo", 0), row("m1", "grpo", 1), row("m2", "dapo", 0)]
+    assert counts_table(rows).splitlines() == [
+        "| runs | m1 | m2 |",
+        "|---|---|---|",
+        "| warm start | 1 | 0 |",
+        "| dapo | 0 | 1 |",
+        "| grpo | 2 | 0 |",
+    ]

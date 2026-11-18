@@ -187,3 +187,13 @@ def test_counts_table_counts_runs_by_algorithm_and_model() -> None:
         "| dapo | 0 | 1 |",
         "| grpo | 2 | 0 |",
     ]
+
+
+def test_a_run_without_gradings_or_metrics_still_gets_the_card(home: Path, tmp_path: Path) -> None:
+    # m4s19: write_card once, after the copying; inside the loop it ran only for runs with files
+    registry = Registry.sqlite(registry_path(home))
+    bare = next(r.run_id for r in registry.list_runs() if r.run_id != first_run(home))
+    out = tmp_path / "dataset"
+    exported = export_runs(home, registry, [bare], out)
+    assert (out / RUNS_CSV).is_file() and (out / CARD).is_file()
+    assert exported.files == 3  # registry.db, runs.csv, README.md

@@ -85,7 +85,7 @@ def export_runs(home: Path, registry: Registry, run_ids: Sequence[str], out: Pat
             for folder in (gradings_folder, metrics_folder):
                 if folder(home, run_id).is_dir():
                     shutil.copytree(folder(home, run_id), folder(out, run_id))
-                    write_card(out, target)  # m4s18: runs.csv and README.md, searched like the rest
+        write_card(out, target)  # m4s18: runs.csv and README.md, searched like the rest
         target.engine.dispose()  # closes the file before it is searched and hashed
         files = sorted(path for path in out.rglob("*") if path.is_file())
         names = machine_names()

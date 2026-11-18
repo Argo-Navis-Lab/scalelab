@@ -1,5 +1,5 @@
 [![CI](https://github.com/Argo-Navis-Lab/scalelab/actions/workflows/ci.yml/badge.svg)](https://github.com/Argo-Navis-Lab/scalelab/actions/workflows/ci.yml)
-[![Dataset on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-md.svg)](https://huggingface.co/datasets/argo-navis-research-laboratory/scalelab-runs)
+[![Hugging Face](https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-md.svg)](https://huggingface.co/datasets/argo-navis-research-laboratory/scalelab-runs)
 
 # ScaleLab
 

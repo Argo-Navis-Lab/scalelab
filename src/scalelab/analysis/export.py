@@ -72,9 +72,9 @@ def sha256(path: Path) -> str:
 
 def export_runs(home: Path, registry: Registry, run_ids: Sequence[str], out: Path) -> Exported:
     """Copy runs from `registry` (home's, or a copy of it) and their files under `home` into
-    `out`, a new or empty folder: registry.db, gradings/, metrics/, runs.csv, README.md and a
-    manifest of every file's sha256. Then search every file for leaks(); finding one deletes
-    `out` again and raises ExportError."""
+    `out`, a new or empty folder: registry.db, gradings/, metrics/, runs.csv, runs.parquet,
+    README.md and a manifest of every file's sha256. Then search every file for leaks(); finding
+    one deletes `out` again and raises ExportError."""
     if out.exists() and any(out.iterdir()):
         raise ExportError(f"{out} is not empty: export into a new folder")
     out.mkdir(parents=True, exist_ok=True)
@@ -85,7 +85,9 @@ def export_runs(home: Path, registry: Registry, run_ids: Sequence[str], out: Pat
             for folder in (gradings_folder, metrics_folder):
                 if folder(home, run_id).is_dir():
                     shutil.copytree(folder(home, run_id), folder(out, run_id))
-        write_card(out, target)  # m4s18: runs.csv and README.md, searched like the rest
+        write_card(
+            out, target
+        )  # m4s18: runs.csv and README.md (m4s20: + runs.parquet), searched like the rest
         target.engine.dispose()  # closes the file before it is searched and hashed
         files = sorted(path for path in out.rglob("*") if path.is_file())
         names = machine_names()

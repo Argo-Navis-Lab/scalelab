@@ -7,8 +7,9 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import yaml
 
-from scalelab.analysis.datacard import CARD, RUNS_CSV, RunRow, counts_table
+from scalelab.analysis.datacard import CARD, RUNS_CSV, RUNS_PARQUET, RunRow, counts_table
 from scalelab.analysis.export import (
     MANIFEST,
     ExportError,
@@ -117,7 +118,8 @@ def test_export_copies_the_runs_without_machine_details(home: Path, tmp_path: Pa
     assert runtime == RuntimeConfig(precision="fp16")  # the machine's fields back to defaults
     assert [job.lease_owner for job in copy.list_jobs("main-0123abcd")] == [None]
     assert exported.runs == 1
-    assert exported.files == 5  # registry.db, the grading, the metrics part, runs.csv, README.md
+    assert exported.files == 6  # registry.db, the grading, the metrics part, runs.csv,
+    # runs.parquet, README.md
     manifest = json.loads((out / MANIFEST).read_text())
     assert manifest["runs"] == [run_id]
     grading = f"gradings/{run_id}/grading-000000000.json"
@@ -171,7 +173,24 @@ def test_export_writes_the_runs_index_and_the_card(home: Path, tmp_path: Path) -
     card = (out / CARD).read_text()
     assert card.startswith("---\nlicense: cc-by-4.0\n")  # the Hub reads this header
     assert "1 finished training runs" in card
-    assert {RUNS_CSV, CARD} <= set(json.loads((out / MANIFEST).read_text())["files"])
+    assert {RUNS_CSV, RUNS_PARQUET, CARD} <= set(json.loads((out / MANIFEST).read_text())["files"])
+    table = pq.read_table(out / RUNS_PARQUET)
+    assert table.to_pylist() == [
+        {k: int(v) if k in INTS else v for k, v in r.items()} for r in rows
+    ]
+
+
+INTS = {"seed", "last_step", "gradings"}
+
+
+def test_every_config_the_card_names_is_parquet(home: Path, tmp_path: Path) -> None:
+    # m4s20: the Hub reads all configs with the default config's builder; runs.csv as the
+    # default made its viewer read metrics/*.parquet as CSV (UnicodeDecodeError on byte 0xa4)
+    out = tmp_path / "dataset"
+    export_runs(home, Registry.sqlite(registry_path(home)), [first_run(home)], out)
+    header = yaml.safe_load((out / CARD).read_text().split("---\n")[1])
+    files = {config["config_name"]: config["data_files"] for config in header["configs"]}
+    assert files == {"runs": RUNS_PARQUET, "metrics": "metrics/*/*.parquet"}
 
 
 def row(model: str, algo: str, seed: int) -> RunRow:
@@ -196,4 +215,4 @@ def test_a_run_without_gradings_or_metrics_still_gets_the_card(home: Path, tmp_p
     out = tmp_path / "dataset"
     exported = export_runs(home, registry, [bare], out)
     assert (out / RUNS_CSV).is_file() and (out / CARD).is_file()
-    assert exported.files == 3  # registry.db, runs.csv, README.md
+    assert exported.files == 4  # registry.db, runs.csv, runs.parquet, README.md

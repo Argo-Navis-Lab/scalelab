@@ -1,5 +1,5 @@
-"""What an export holds, for the people who download it: runs.csv, one line a run, and the
-README.md the Hugging Face Hub shows as the dataset's page (its datasheet)."""
+"""What an export holds, for the people who download it: runs.csv and runs.parquet, one line
+a run, and the README.md the Hugging Face Hub shows as the dataset's page (its datasheet)."""
 
 import csv
 import io
@@ -8,11 +8,18 @@ from collections import Counter
 from dataclasses import astuple, dataclass, fields
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 from scalelab.core.registry import Registry
-from scalelab.core.storage import atomic_write_text
+from scalelab.core.storage import atomic_write_bytes, atomic_write_text
 from scalelab.rl.gradings import gradings_folder
 
 RUNS_CSV = "runs.csv"
+# m4s20: the Hub's viewer reads every config with ONE builder, picked from the default config's
+# files: a CSV default made it read metrics/*.parquet as CSV (UnicodeDecodeError). Every config
+# the card names is Parquet; runs.csv stays for spreadsheets.
+RUNS_PARQUET = "runs.parquet"
 CARD = "README.md"
 CODE = "https://github.com/Argo-Navis-Lab/scalelab"
 
@@ -64,6 +71,18 @@ def runs_csv(rows: list[RunRow]) -> str:
     return out.getvalue()
 
 
+def runs_parquet(rows: list[RunRow]) -> bytes:
+    """The same table as runs_csv, as Parquet bytes (seed, last_step, gradings as int64)."""
+    columns = {field.name: [getattr(row, field.name) for row in rows] for field in fields(RunRow)}
+    types = {
+        field.name: pa.int64() if field.type is int else pa.string() for field in fields(RunRow)
+    }
+    table = pa.table({name: pa.array(values, type=types[name]) for name, values in columns.items()})
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink)
+    return sink.getvalue().to_pybytes()
+
+
 def counts_table(rows: list[RunRow]) -> str:
     """Runs by kind and algorithm (lines) and model (columns), as a Markdown table."""
     models = sorted({row.model for row in rows})
@@ -90,7 +109,7 @@ size_categories:
 - n<1K
 configs:
 - config_name: runs
-  data_files: {RUNS_CSV}
+  data_files: {RUNS_PARQUET}
   default: true
 - config_name: metrics
   data_files: metrics/*/*.parquet
@@ -108,7 +127,8 @@ per-step telemetry.
 
 ## What is in it
 
-- `{RUNS_CSV}`: one line a run (kind, model, algo, seed, its warm start, commit, last step).
+- `{RUNS_CSV}` and `{RUNS_PARQUET}`: one line a run (kind, model, algo, seed, its warm start,
+  commit, last step); the Parquet one is what the viewer shows.
 - `registry.db`: ScaleLab's SQLite registry of these runs only: each config exactly as
   hashed, run rows, eval rows, anomaly findings, runtime settings, the sweeps and jobs.
 - `gradings/<run_id>/grading-<step>.json`: one grading a file, every problem's outcome.
@@ -144,7 +164,8 @@ Data CC BY 4.0; the code that made it Apache-2.0. Cite the code repository.
 
 
 def write_card(home: Path, registry: Registry) -> None:
-    """runs.csv and README.md into `home` (an export), from its own registry."""
+    """runs.csv, runs.parquet and README.md into `home` (an export), from its own registry."""
     rows = run_rows(home, registry)
     atomic_write_text(home / RUNS_CSV, runs_csv(rows))
+    atomic_write_bytes(home / RUNS_PARQUET, runs_parquet(rows))
     atomic_write_text(home / CARD, dataset_card(rows))

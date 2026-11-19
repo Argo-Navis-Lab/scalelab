@@ -3,6 +3,7 @@ message: "If you use ScaleLab or its dataset, please cite it as below."
 type: software
 title: "ScaleLab: a measurement lab for reinforcement learning on small language models"
 version: 1.0.0
+date-released: 2026-11-19
 authors:
   - given-names: Soheil
     family-names: Sanati Moutaban

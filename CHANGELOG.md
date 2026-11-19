@@ -4,7 +4,7 @@ Every release of ScaleLab, newest first. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [1.0.0] - Unreleased
+## [1.0.0] - 2026-11-19
 
 The first release: the measurement lab behind Write-ups 1 and 2 and the
 [scalelab-runs](https://huggingface.co/datasets/argo-navis-research-laboratory/scalelab-runs) dataset.

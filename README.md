@@ -66,6 +66,11 @@ to `runs/` (or `SCALELAB_HOME`). `uv run scalelab --help` lists every command.
 
 CI runs the same four on every push.
 
+## Citing
+
+To cite ScaleLab, use [CITATION.cff](CITATION.cff) (GitHub's "Cite this repository"
+button reads it). What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 Code: Apache 2.0 ([LICENSE](LICENSE)). Dataset: CC BY 4.0.

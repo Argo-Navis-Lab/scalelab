@@ -44,6 +44,9 @@ Python 3.12 and [uv](https://docs.astral.sh/uv/). On a Mac or Linux CPU:
 `hello` is a 16-step warm start of the smallest model (about 10 s). Runs and their records go
 to `runs/` (or `SCALELAB_HOME`). `uv run scalelab --help` lists every command.
 
+To go further on a CPU in a few minutes (a warm start, RL with telemetry, a graded gain, and the
+real runs' DAPO-GRPO comparison), follow the [walkthrough](docs/walkthrough.md).
+
 ## What is inside
 
 | Part | What it does | Commands |
@@ -77,4 +80,4 @@ Code: Apache 2.0 ([LICENSE](LICENSE)). Dataset: CC BY 4.0.
 
 ---
 
-Maintained by **SOHEIL SANATI MOUTABAN** · [Argo Navis Lab](https://github.com/Argo-Navis-Lab)
+Maintained by Soheil Sanati Moutaban · [Argo Navis Lab](https://github.com/Argo-Navis-Lab)

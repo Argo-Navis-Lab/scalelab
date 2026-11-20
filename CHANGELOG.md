@@ -4,6 +4,17 @@ Every release of ScaleLab, newest first. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Write-up 2 now calls its DAPO what it is, a DAPO-style variant that drops flat groups without
+  refilling the batch; says a dropped group's generation is billed; reports the m4 backtest's
+  predicted values (it misses at the last grading too); reads equal samples as "no difference
+  detected"; states how the power estimate was made; and its figures name the algorithms.
+- The README and the walkthrough say the same.
+
+
 ## [1.0.0] - 2026-11-19
 
 The first release: the measurement lab behind Write-ups 1 and 2 and the

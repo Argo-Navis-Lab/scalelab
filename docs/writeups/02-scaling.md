@@ -9,15 +9,20 @@ ScaleLab M4, 2026-11-17. Figures: `scalelab report scaling` (see Reproduce).
   per size, and fitted **one family of sigmoid curves in compute** whose three parameters
   move linearly in log size. It fits all 50 runs to **1.4 pp (GRPO) and 1.6 pp (DAPO) rms**.
 - **The fit pins R where it was measured, not where it is going.** A seed bootstrap gives
-  R at each size's last compute to within about 1 pp, but the ceiling A spans about 50 pp
-  from m2 or m3 up (GRPO m3-m5 roughly 30-85%).
-- **Backtest: one rung up works, the next does not.** Fitted on m1-m3, the family predicts
-  m4 from its starting accuracy alone to 1.5 pp (GRPO) and 1.2 pp (DAPO) rms. Fitted on
-  m1-m4, it over-predicts m5 by about 3 pp at the end of the run (GRPO 15.7% predicted,
-  12.2% measured; DAPO 19.1% v 16.9%), outside the seed bootstrap's interval.
-- **DAPO beats GRPO at equal FLOPs (+3.6 to +7.0 pp at every size), and not at equal
-  samples** (-0.6 to +1.6 pp, every interval spans zero). Its win is the extra samples our
-  FLOP accounting lets it draw, not a better update per sample.
+  R at each size's last compute to within about 1 pp, but the ceiling A spans about 45 to
+  55 pp from m3 up (GRPO m3-m5 roughly 26-82%).
+- **Backtest: both held-out sizes miss at the end.** Fitted on m1-m3, the family predicts
+  m4 from its starting accuracy alone to 1.5 pp (GRPO) and 1.2 pp (DAPO) rms over its
+  trajectory, but under-predicts its last grading (GRPO 19.2% v 21.5% measured, DAPO 24.3%
+  v 25.1%). Fitted on m1-m4, it over-predicts m5 by about 3 pp at the end of the run (GRPO
+  15.7% v 12.2%, DAPO 19.1% v 16.9%). All four measured values fall outside the 95%
+  bootstrap interval for the predicted mean, which resamples seeds only: it is not a
+  predictive interval, and it leaves out the form's own uncertainty.
+- **DAPO beats GRPO at equal FLOPs (+3.6 to +7.0 pp at every size); at equal samples no
+  difference is detected** (-0.6 to +1.6 pp, every interval spans zero, but they allow up
+  to +3.3 pp). Equal FLOPs buys DAPO 2.2-3.4x the steps. Our DAPO is a variant (it never
+  refills the batch it filters: see Setup), and it differs from GRPO in five ways at once,
+  so this doesn't isolate any one of them.
 - None of this was pre-registered. The plan was to commit a prediction for two larger
   sizes before running them; those runs were cut, and the backtests stand in for them.
 
@@ -40,15 +45,24 @@ ScaleLab M4, 2026-11-17. Figures: `scalelab report scaling` (see Reproduce).
   **R** = greedy pass@1 over the two frozen eval sets pooled (653 problems). **R_0** = R
   before RL. At 20M tokens R_0 *falls* with size: a fixed token budget undertrains the
   bigger models.
-- **RL.** GRPO (clip 0.2, KL 0.04 to the warm start) and DAPO (clip 0.2/0.28, token-mean
-  loss, no KL, groups whose 8 answers all score the same dropped). 64 prompts x 8 answers a
-  step, constant lr 1e-5, fp16, one T4. Rewards: 1 for the right answer, 0 otherwise.
+- **RL.** GRPO (clip 0.2, KL 0.04 to the warm start, each answer's loss averaged, then
+  averaged over answers) and a DAPO-style variant (clip 0.2/0.28, token-mean loss, no KL, a
+  soft penalty for overlong answers, groups whose 8 answers all score the same dropped). The
+  DAPO paper samples more until the batch is full again; ours does not, so each update
+  learns from the groups that survive (about half at m1, a quarter at m5). "DAPO" below
+  means this variant. 64 prompts x 8 answers a step, constant lr 1e-5, fp16, one T4.
+  Rewards: 1 for the right answer, 0 otherwise.
 - **Budget.** Each size gets the FLOPs of 1000 GRPO steps as the cost model prices them
   (`rl.flops`: m1 1.3e15 to m5 8.7e16). A pilot at m1, m3 and m5 showed that none reached
   90% of its fitted ceiling by step 1000. GRPO runs about 1010-1020 steps on that budget;
-  DAPO 2233-3446, because a dropped group skips log-probs and training and is not billed.
+  DAPO 2233-3446: a dropped group's generation is billed, but it skips log-probs and
+  training, and DAPO has no KL reference pass (at m5 a DAPO step costs 2.5e13 FLOPs, a
+  GRPO step 8.5e13).
 - **Seeds.** A 10-seed study at m2 and m4 measured the seed spread of final R (sd 0.57 and
-  1.02 pp): five seeds give at least 88% power to see a 3 pp difference.
+  1.02 pp). Power: 20 times a size, the 10 seeds split at random into two arms of five,
+  matched in order as `versus` matches seed s with seed s, and the seeds-and-problems
+  bootstrap run on the per-problem differences. Mean 95% half-width 1.67 pp (m2), 1.87 pp
+  (m4); with SE = half-width / 1.96, power at 3 pp = Phi(3 / SE - 1.96): 94% and 88%.
 - **C** = the RL FLOPs a run has spent (sampling, log-probs, training), summed over steps.
   Gradings run at steps 0, 1, 2, 3, 6, 10, 18, 32, 56, 100 and every 100 after.
 
@@ -78,11 +92,11 @@ Six numbers fit every grading after step 0 of every run, seeds pooled, by least 
 | GRPO final R, measured | 41.2% | 26.9% | 23.1% | 21.5% | 12.2% |
 | GRPO, fitted | 41.0% | 27.3% | 23.0% | 20.0% | 14.6% |
 | GRPO A | 49.3% | 41.3% | 36.7% | 33.4% | 30.9% |
-| GRPO A, 95% interval | 45-76% | 38-73% | 33-82% | 29-87% | 26-85% |
+| GRPO A, 95% interval | 46-76% | 38-71% | 33-78% | 29-82% | 26-69% |
 | DAPO final R, measured | 46.8% | 34.0% | 29.2% | 25.1% | 16.9% |
 | DAPO, fitted | 46.8% | 35.1% | 28.5% | 24.1% | 16.8% |
 | DAPO A | 60.3% | 84.4% | 92.1% | 95.3% | 97.0% |
-| DAPO A, 95% interval | 55-68% | 64-92% | 52-97% | 42-99% | 35-99% |
+| DAPO A, 95% interval | 56-69% | 69-91% | 58-97% | 48-98% | 40-99% |
 
 *Intervals: 200 seed bootstraps (resample each size's seeds, refit). Residuals: GRPO 1.39
 pp rms over 350 gradings, DAPO 1.56 pp over 410.*
@@ -106,21 +120,22 @@ measured R_0 alone (`scalelab backtest`), and compare with its five seeds.
 
 | fitted on, predicted | algorithm | fit rms | held-out rms | bias | last R predicted [95%] | measured |
 |---|---|---:|---:|---:|---:|---:|
-| m1-m3, m4 | GRPO | 1.39 pp | 1.46 pp | -0.85 pp | | 21.5% |
-| m1-m3, m4 | DAPO | 1.66 pp | 1.23 pp | -0.02 pp | | 25.1% |
-| m1-m4, m5 | GRPO | 1.32 pp | 2.22 pp | +1.92 pp | 15.7% [15.5, 16.0] | 12.2% |
-| m1-m4, m5 | DAPO | 1.56 pp | 2.37 pp | +1.84 pp | 19.1% [18.6, 19.4] | 16.9% |
+| m1-m3, m4 | GRPO | 1.39 pp | 1.46 pp | -0.85 pp | 19.2% [18.9, 19.6] | 21.5% |
+| m1-m3, m4 | DAPO | 1.66 pp | 1.23 pp | -0.02 pp | 24.3% [23.7, 24.9] | 25.1% |
+| m1-m4, m5 | GRPO | 1.32 pp | 2.22 pp | +1.92 pp | 15.7% [15.4, 16.0] | 12.2% |
+| m1-m4, m5 | DAPO | 1.56 pp | 2.37 pp | +1.84 pp | 19.1% [17.9, 19.4] | 16.9% |
 
 *Held-out rms over every grading of the predicted size's five seeds; bias = predicted
 minus measured, averaged. The interval resamples the fitted sizes' seeds only, not the
 form, so it is narrow.*
 
-The m4 prediction is as good as the fit itself. The m5 prediction starts close (+0.6 pp at
-step 1 for GRPO) and drifts high as compute grows (+2.3 pp at step 100, +3.5 pp at the
-end). m4 to m5 is a smaller step in size (1.9x) than m3 to m4 (2.2x), so distance is not
-the cause. Our reading: m5 is the most undertrained warm start (lowest R_0, highest N per
-token), and nothing in the family knows about warm-start tokens. A prediction for larger
-models from this ladder would have been worse, not better.
+Over its whole trajectory the m4 prediction is as good as the fit itself, but at the last
+grading it falls short by 2.3 pp (GRPO) and 0.8 pp (DAPO), outside the seed interval. The
+m5 prediction starts close (+0.6 pp at step 1 for GRPO) and drifts high as compute grows
+(+2.3 pp at step 100, +3.5 pp at the end). m4 to m5 is a smaller step in size (1.9x) than
+m3 to m4 (2.2x), so distance is not the cause. Our hypothesis: m5 is the most undertrained
+warm start (lowest R_0, highest N per token), and nothing in the family knows about
+warm-start tokens. It is not tested here: one warm start a size, no token budget varied.
 
 ## DAPO against GRPO: what "equal" means
 
@@ -134,13 +149,19 @@ GRPO's final measure, then bootstraps the per-problem differences over seeds and
 | equal FLOPs | +5.6 [2.5, 8.6] | +7.0 [4.8, 9.3] | +6.1 [4.0, 8.2] | +3.6 [1.3, 6.2] | +4.7 [2.3, 7.1] |
 | equal samples | +0.7 [-2.1, 3.3] | +0.8 [-1.4, 2.9] | +1.6 [-0.1, 3.3] | -0.6 [-2.5, 1.4] | +0.4 [-1.3, 2.2] |
 
-At equal FLOPs DAPO wins at every size. But our FLOPs count what a step computes, and DAPO
-drops the groups whose answers all score alike (about two thirds of them) after sampling
-them: they skip log-probs and training, so they cost almost nothing in our accounting,
-while generation, which dominates an RL step's time at this scale
-([Write-up 1](01-cost-model.md)), still runs all 512 answers. Equal FLOPs buys DAPO
-2.2-3.4x the steps. Read at equal samples (GRPO's ~1017 steps against DAPO's 1000), the
-difference is gone at every size.
+At equal FLOPs DAPO wins at every size. Our FLOPs count what a step computes: DAPO's
+dropped groups are generated and billed, then skip log-probs and training, and DAPO has no
+KL reference pass either. Generation is a small share of the FLOPs (15% of a GRPO step at
+m5) but dominates the time at this scale: in these fp16 runs' own timings, 49% (m5) to 83%
+(m1) of a GRPO step and 71-86% of a DAPO step ([Write-up 1](01-cost-model.md) explains
+why). So equal FLOPs buys DAPO 2.2-3.4x the steps. In FLOP bookkeeping at m5, a GRPO step
+without its reference pass would cost 1.21x less, and the passes DAPO skips cover the
+remaining 2.8x; RLOO (no reference, no filtering) ran 1.21x GRPO's steps, as that predicts.
+That splits what the counter charged; it is not an ablation. Read at equal samples (GRPO's
+~1017 steps against DAPO's 1000; samples count every generated answer), no difference is
+detected at any size, though the intervals allow up to +3.3 pp. Clipping, KL, loss
+averaging and overlong shaping differ too, so isolating the filtering needs an ablation
+(GRPO plus filtering only) that was not run.
 
 Equal wall-clock time is the comparison a practitioner wants, and these runs cannot answer
 it. Per step DAPO is cheaper (m5: 1000 steps took 2.9-3.7 h, GRPO's 4.7-5.1 h), and its
@@ -172,6 +193,10 @@ case with seeds, intervals and a held-out size, not a new law.
   all chosen after the sweep's data existed.
 - **One warm start a size.** The size axis has one draw per size; RL seeds share it. R_0
   falls with size, so size and undertraining move together.
+- **A DAPO-style variant, five changes at once.** No refill, so DAPO's batch shrinks; and it
+  differs from GRPO in clipping, KL, loss averaging, overlong shaping and filtering.
+- **Pointwise intervals.** Five sizes compared, no correction for multiple comparisons; the
+  intervals cover RL seeds and eval problems, not warm-start variation.
 - **One task, one learning rate, one budget rule.** Multiplication at 4-5 digits (653
   problems), lr 1e-5 at every size, 1000 GRPO steps' FLOPs. A skill with unlimited
   supervised data is an odd target for RL; it was chosen because it is cheap to verify.
@@ -196,8 +221,8 @@ DAPO run ids in `$GRPO` and `$DAPO`:
 
 ```bash
 uv run scalelab report scaling $GRPO $DAPO --out docs/writeups/figs
-uv run scalelab joint $GRPO --bootstrap 200
-uv run scalelab backtest $GRPO --bootstrap 200
+uv run scalelab joint $GRPO --bootstrap 4000
+uv run scalelab backtest $GRPO --bootstrap 4000
 uv run scalelab versus $DAPO --against $GRPO --at samples
 uv run scalelab power $GRPO
 ```

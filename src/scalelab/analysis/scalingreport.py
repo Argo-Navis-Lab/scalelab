@@ -27,6 +27,14 @@ MEASURE_NAMES = {"samples": "samples", "flops": "FLOPs", "seconds": "hours"}
 CURVE_POINTS = 200  # where a curve is drawn, evenly spaced in log C
 R_LABEL = "R: greedy pass@1, pooled (%)"
 C_LABEL = "C: RL FLOPs spent"
+# m4s24: what the figures call each algorithm. Our dapo drops the groups whose answers all
+# score the same without sampling more to refill the batch, as the DAPO paper does: a variant.
+ALGO_NAMES = {
+    "grpo": "GRPO",
+    "dr_grpo": "Dr. GRPO",
+    "rloo": "RLOO",
+    "dapo": "DAPO-style (no refill)",
+}
 
 
 @dataclass(frozen=True)
@@ -39,6 +47,11 @@ class Study:
     names: Mapping[int, str]  # N -> the size's name
     family: Family
     held_out: Family
+
+
+def algo_name(algo: str) -> str:
+    """The figures' name for an algorithm preset; an unknown one keeps its own."""
+    return ALGO_NAMES.get(algo, algo)
 
 
 def by_size(runs: Sequence[SizedRun]) -> dict[int, list[SizedRun]]:
@@ -86,7 +99,7 @@ def curves_figure(studies: Sequence[Study]) -> Figure:
             color = shade(index, len(groups))
             draw_size(panel, study.family, runs, color)
             handles.append(Line2D([], [], color=color, marker="o", label=study.names[params]))
-        label(panel, f"{study.algo}: one family through {len(study.runs)} runs")
+        label(panel, f"{algo_name(study.algo)}: one family through {len(study.runs)} runs")
         panel.legend(handles=handles, frameon=False, labelcolor=INK, fontsize=8)
     return figure
 
@@ -100,7 +113,7 @@ def backtest_figure(studies: Sequence[Study]) -> Figure:
         largest = max(groups)
         draw_size(panel, study.held_out, groups[largest], ORANGE)
         smaller = " ".join(study.names[params] for params in groups if params != largest)
-        label(panel, f"{study.algo}: {study.names[largest]} predicted from {smaller}")
+        label(panel, f"{algo_name(study.algo)}: {study.names[largest]} predicted from {smaller}")
         handles = [
             Line2D([], [], color=ORANGE, marker="o", linestyle="", label="measured, each seed"),
             Line2D([], [], color=ORANGE, label="predicted before RL"),
@@ -146,7 +159,7 @@ def write_report(
 ) -> list[Path]:
     """report scaling's three figures in `out`; the versus one compares the second study's
     algorithm with the first's."""
-    base, other = (study.algo for study in studies)
+    base, other = (algo_name(study.algo) for study in studies)
     return [
         save_figure(curves_figure(studies), out / CURVES_FIGURE),
         save_figure(backtest_figure(studies), out / BACKTEST_FIGURE),

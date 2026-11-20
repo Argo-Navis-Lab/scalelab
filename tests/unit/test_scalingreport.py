@@ -9,6 +9,7 @@ from scalelab.analysis.scalingreport import (
     SIZE_SHADES,
     VERSUS_FIGURE,
     Study,
+    algo_name,
     by_size,
     shade,
     write_report,
@@ -58,3 +59,10 @@ def test_every_figure_is_saved_as_a_png(tmp_path: Path) -> None:
 def test_the_report_compares_exactly_two_algorithms(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         write_report([study("grpo")], {}, tmp_path)
+
+
+def test_the_figures_call_our_dapo_a_variant() -> None:
+    # m4s24: our dapo never refills the batch it filtered, so it is not the paper's DAPO
+    assert algo_name("dapo") == "DAPO-style (no refill)"
+    assert algo_name("grpo") == "GRPO"
+    assert algo_name("ppo") == "ppo"  # a preset without a name keeps its own

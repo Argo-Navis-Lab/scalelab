@@ -180,8 +180,9 @@ m5 dapo: experiment bc652cd7a72d1ce9 at 0413a34f
   arithmetic-4/*    316   13.6%   31.3%  +17.7 [+12.5, +23.2] pp   +17.3 [+12.0, +23.6] pp   improved
 ```
 
-DAPO looks twice as good. Both had the same FLOPs budget, but DAPO skips the training passes of
-groups that teach nothing, so it ran 3.4 times the steps. Compare the five seeds pair by pair,
+DAPO looks twice as good. Both had the same FLOPs budget, but DAPO (here a variant that drops
+groups whose answers all score the same without refilling the batch) skips their log-prob and
+training passes, so it ran 3.4 times the steps. Compare the five seeds pair by pair,
 first at equal FLOPs, then at equal samples:
 
 ```bash
@@ -194,8 +195,8 @@ m5: other - base +4.69 pp [+2.30, +7.11], 5 seeds x 653 problems, 95%
 m5: other - base +0.43 pp [-1.29, +2.17], 5 seeds x 653 problems, 95%
 ```
 
-At equal FLOPs DAPO wins by 4.7 pp; given the same number of sampled answers, it doesn't. Its
-win is more samples for the same compute, not more learning per sample.
+At equal FLOPs DAPO wins by 4.7 pp; given the same number of sampled answers, no difference is
+detected. Most of its win comes with running more steps on the same compute.
 
 ## Where next
 

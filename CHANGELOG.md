@@ -26,6 +26,11 @@ Every release of ScaleLab, newest first. The format follows
 - Write-up 1 reports fp16 with the padding cut, the runtime the M4 sweep used (step MAPE 6.4%),
   and no longer lists that combination as never measured.
 - The dataset card says its `dapo` runs are the no-refill DAPO-style variant.
+- Write-up 2 says how closely matched points line up (FLOPs within 1%, samples 1.1-1.8%,
+  wall-clock hours only loosely for RLOO), reads RLOO against GRPO as a contrast of recipes
+  rather than a cause, gives RLOO's fit and backtests from 4000 seed bootstraps, says the
+  runs used one T4 at a time on several machines, and that rules fixed beforehand are only
+  in a private plan.
 
 
 ## [1.0.0] - 2026-11-19

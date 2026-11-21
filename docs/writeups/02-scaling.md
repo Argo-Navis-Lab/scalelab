@@ -27,7 +27,9 @@ ScaleLab M4, 2026-11-17. Figures: `scalelab report scaling` (see Reproduce).
   or equal samples, despite 1.21x the steps; DAPO-style beats it at every size at equal FLOPs
   (+4.4 to +5.3 pp).
 - None of this was pre-registered. The plan was to commit a prediction for two larger
-  sizes before running them; those runs were cut, and the backtests stand in for them.
+  sizes before running them; those runs were cut, and the backtests stand in for them. Some
+  decision rules (the task bands, the RL budget, the prediction's algorithm) were written in
+  a private plan before the data they decide; no public, timestamped record shows that.
 
 ## Setup
 
@@ -60,7 +62,8 @@ ScaleLab M4, 2026-11-17. Figures: `scalelab report scaling` (see Reproduce).
   soft penalty for overlong answers, groups whose 8 answers all score the same dropped). The
   DAPO paper samples more until the batch is full again; ours does not, so each update
   learns from the groups that survive (about half at m1, a quarter at m5). "DAPO-style" below
-  always means this variant. 64 prompts x 8 answers a step, constant lr 1e-5, fp16, one T4.
+  always means this variant. 64 prompts x 8 answers a step, constant lr 1e-5, fp16, on a T4
+  (one GPU at a time: Colab's, then two rented machines).
   Rewards: 1 for the right answer, 0 otherwise.
 - **Budget.** Each size gets the FLOPs of 1000 GRPO steps as the cost model prices them
   (`rl.flops`: m1 1.3e15 to m5 8.7e16). A pilot at m1, m3 and m5 showed that none reached
@@ -156,8 +159,9 @@ warm-start tokens. It is not tested here: one warm start a size, no token budget
 
 `scalelab versus` pairs runs by size and seed and reads DAPO-style at its recorded grading
 nearest to GRPO's final measure (no interpolation), then bootstraps the per-problem
-differences over seeds and problems. At equal FLOPs that is each run's last grading; at
-equal samples, the DAPO-style run's grading at step 1000 against GRPO's last (step 1011-1018).
+differences over seeds and problems. At equal FLOPs that is each run's last grading
+(cumulative FLOPs within 1%); at equal samples, the DAPO-style run's grading at step 1000
+against GRPO's last (step 1011-1018), so GRPO has generated 1.1-1.8% more answers.
 
 ![DAPO-style minus GRPO at equal samples and at equal FLOPs, per size](figs/scaling-versus.png)
 
@@ -200,13 +204,19 @@ no reference pass), GRPO's clipping and loss averaging, no filtering. An m5 step
 | DAPO-style - RLOO, equal FLOPs | +5.3 [1.6, 9.0] | +4.7 [2.5, 7.0] | +5.3 [3.2, 7.3] | +4.7 [2.1, 7.1] | +4.4 [1.9, 7.1] |
 
 One of five equal-FLOPs intervals excludes zero (m2), with no trend in size; at equal
-samples none does. So 21% more steps bought nothing detectable, where DAPO-style's 2.2-3.4x
-came with +3.6 to +7.0 pp: saving passes doesn't by itself win at equal FLOPs. At the same
+samples none does (matched as above). At equal wall-clock hours the match is loose: past
+step 562 RLOO is graded only at 1000 and at its end, so its nearest grading lands 9% short
+of GRPO's hours to 13% past them; no interval excludes zero there either (-1.3 to +1.0 pp).
+RLOO's 21% more steps came with no detectable difference, where DAPO-style's 2.2-3.4x came
+with +3.6 to +7.0 pp. That contrasts two recipes (RLOO also changes the baseline and drops
+the KL penalty); it doesn't show what causes either result. At the same
 step RLOO's policy entropy tracks DAPO-style's (m3, step 1000: 0.0163 and 0.0164 nats a
 token, GRPO 0.0201): GRPO, the one with a KL penalty, stays higher.
 
-The family fits RLOO's 25 runs to 1.50 pp rms over 350 gradings; with 400 seed bootstraps
-its ceiling A spans 28-92% at m3, 23-96% at m4, 20-98% at m5. Backtests: m1-m3 -> m4 1.27 pp
+The family fits RLOO's 25 runs to 1.50 pp rms over 350 gradings; with 4000 seed bootstraps
+its ceiling A spans 28-53% at m3, 23-41% at m4, 20-32% at m5: narrower than GRPO's, but a
+run of 400 bootstraps had put the upper ends at 92-98%, so a few resamples still jump to a
+far-off ceiling and the top edge depends on how many are drawn. Backtests: m1-m3 -> m4 1.27 pp
 held-out rms, bias -0.30 pp, last grading 20.4% [19.9, 20.9] v 20.5% measured (inside, the
 only one of the three algorithms); m1-m4 -> m5 2.40 pp, +1.96 pp, 16.1% [15.9, 16.4] v 12.5%
 (+3.7 pp). All three algorithms over-predict m5's last grading, by 2.2-3.7 pp.
@@ -233,7 +243,8 @@ case with seeds, intervals and a held-out size, not a new law.
 ## Limits
 
 - **Not pre-registered.** The family's form, its fitting choices and the backtests were
-  all chosen after the sweep's data existed.
+  all chosen after the sweep's data existed. The rules fixed beforehand are only in a private
+  plan.
 - **One warm start a size.** The size axis has one draw per size; RL seeds share it. R_0
   falls with size, so size and undertraining move together.
 - **A DAPO-style variant, five changes at once.** No refill, so the variant's batch shrinks; and it
@@ -271,8 +282,8 @@ uv run scalelab versus $GRPO --against $DAPO --at flops
 uv run scalelab versus $GRPO --against $DAPO --at samples
 uv run scalelab power $GRPO
 uv run scalelab versus $GRPO --against $RLOO --at flops
-uv run scalelab joint $RLOO --bootstrap 400
-uv run scalelab backtest $RLOO --bootstrap 400
+uv run scalelab joint $RLOO --bootstrap 4000
+uv run scalelab backtest $RLOO --bootstrap 4000
 ```
 
 The sweep files are [configs/sweeps](../../configs/sweeps) (`main-grpo.yaml`,

@@ -119,7 +119,9 @@ configs:
 
 {len(rows)} finished training runs of small transformers (m1-m5) on arithmetic, made with
 [ScaleLab]({CODE}): warm starts (supervised pretraining) and the RL runs started from them,
-GRPO, RLOO and DAPO at equal FLOPs, 5 seeds each (10 for GRPO at m2 and m4). Every run
+GRPO, RLOO and a DAPO-style variant at equal FLOPs, 5 seeds each (10 for GRPO at m2 and m4).
+The algo `dapo` is that variant, not DAPO as published: it drops groups whose answers all
+score the same but never refills the batch with more samples. Every run
 keeps its config, its gradings (pass@1 on frozen eval sets, problem by problem) and its
 per-step telemetry.
 

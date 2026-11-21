@@ -166,7 +166,15 @@ benchmarks, so they are priced at the datasheet's ideal (fp16 steps: MAPE 13.1%,
 build, flagged as a risk before it was measured.
 
 Decided from these: the padding cut on the T4 from m2 up (it stays off by default); fp16
-for warm starts m1-m4 and RL from m2 up; RL at m1 stays fp32.
+for warm starts m1-m4 and RL from m2 up; RL at m1 stays fp32. (The M4 scaling study later
+ran every size in fp16, m1 included, so one numerics spans its ladder.)
+
+**fp16 and the cut together** (measured in M4 step 2, notebook cell O, T4; the runtime the
+M4 sweep used): step time predicted / measured - 1 was -6.3 / -1.6 / +4.1% for RL m2 / m3 /
+m4 and -22.4 / -9.8 / -0.6 / -0.2% for warm starts m2 / m3 / m4 / m5. Over these 7
+configurations, MAPE 6.4% and bias -5.3% (RL alone: MAPE 4.0%). In the RL steps the parts
+miss in opposite directions and cancel: training is priced 16-18% fast, generation up to 18%
+slow (at m4).
 
 ## What the model gets wrong
 
@@ -182,7 +190,7 @@ for warm starts m1-m4 and RL from m2 up; RL at m1 stays fp32.
   error 12-27% on gloo, 10% with NCCL across Kaggle's two T4s), but NCCL's all-gather (-31%)
   and reduce-scatter (-22%) don't fit the same link, and gloo's reduce-scatter isn't a ring.
   M7 revisits it when runs span GPUs.
-- **Never measured**: fp16 and the padding cut together; fp16 on the A100 (no fp16 fit there).
+- **Never measured**: fp16 on the A100 (no fp16 fit there).
 
 ## What changes next
 

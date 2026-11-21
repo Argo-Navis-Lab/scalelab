@@ -18,6 +18,14 @@ Every release of ScaleLab, newest first. The format follows
   what it found (close at m4, over-predicts m5), computes power over all 252 seed splits and
   calls it approximate, clarifies the 100M-token warm starts' numbers, and says the eval sets informed
   the design.
+- Write-up 2 says "DAPO-style" throughout, gives its gradings schedule as run (four per decade,
+  every 1000 steps, the last step), says how `versus` picks the matched grading (nearest, no
+  interpolation), fixes its reproduce command (GRPO is the base), adds RLOO (comparisons, fit,
+  backtests, run ids) and says its ceiling intervals come from 4000 seed bootstraps (the
+  caption said 200).
+- Write-up 1 reports fp16 with the padding cut, the runtime the M4 sweep used (step MAPE 6.4%),
+  and no longer lists that combination as never measured.
+- The dataset card says its `dapo` runs are the no-refill DAPO-style variant.
 
 
 ## [1.0.0] - 2026-11-19

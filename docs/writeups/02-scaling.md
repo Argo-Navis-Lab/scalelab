@@ -46,6 +46,12 @@ ScaleLab M4, 2026-11-17. Figures: `scalelab report scaling` (see Reproduce).
   **R** = greedy pass@1 over the two frozen eval sets pooled (653 problems). **R_0** = R
   before RL. At 20M tokens R_0 *falls* with size: a fixed token budget undertrains the
   bigger models.
+  
+- **The eval sets were seen while designing.** The 100M warm starts' results on them led to
+  20M tokens, the bands were picked on them by the rule above, the pilot that set the budget
+  was graded on them, and every RL result is reported on them. No eval problem is trained on,
+  but these numbers are not from untouched held-out data.
+
 - **RL.** GRPO (clip 0.2, KL 0.04 to the warm start, each answer's loss averaged, then
   averaged over answers) and a DAPO-style variant (clip 0.2/0.28, token-mean loss, no KL, a
   soft penalty for overlong answers, groups whose 8 answers all score the same dropped). The
@@ -60,15 +66,17 @@ ScaleLab M4, 2026-11-17. Figures: `scalelab report scaling` (see Reproduce).
   training, and DAPO has no KL reference pass (at m5 a DAPO step costs 2.5e13 FLOPs, a
   GRPO step 8.5e13).
 - **Seeds.** A 10-seed study at m2 and m4 measured the seed spread of final R (sd 0.57 and
-  1.02 pp). Power, approximate: for all 252 ways to split the 10 seeds into two arms of five,
-  matched in order as `versus` matches seed s with seed s, and the seeds-and-problems
+  1.02 pp). Power, approximate: for all 252 assignments of the 10 seeds to two labelled arms
+  of five (126 distinct partitions, each under both labellings), the arms' seeds matched in
+  order as `versus` matches seed s with seed s, and the seeds-and-problems
   bootstrap run on the per-problem differences. Mean 95% half-width 1.69 pp (m2), 1.90 pp
   (m4); with SE = half-width / 1.96, power at 3 pp = Phi(3 / SE - 1.96): 93% and 87%. This
   assumes DAPO's seeds vary as GRPO's do and that seed s of two algorithms pairs no more
   closely than two GRPO seeds. The real equal-samples intervals came out wider (half-widths
   1.7-2.7 pp: power at 3 pp roughly 60-93%), so five seeds resolve about 3 pp at best.
 - **C** = the RL FLOPs a run has spent (sampling, log-probs, training), summed over steps.
-  Gradings run at steps 0, 1, 2, 3, 6, 10, 18, 32, 56, 100 and every 100 after.
+  Gradings run at steps 0, 1, 2, 3, 6, 10, 18, 32, 56, 100, 178, 316, 562, 1000, 1778, 3162
+  (four per decade), every 1000 steps, and at the run's last step.
 
 ## One family of curves
 

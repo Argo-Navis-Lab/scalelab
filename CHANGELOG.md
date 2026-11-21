@@ -16,7 +16,8 @@ Every release of ScaleLab, newest first. The format follows
 
 - Write-up 2 gives sizes as non-embedding parameters (0.80M to 59.5M), heads its backtest by
   what it found (close at m4, over-predicts m5), computes power over all 252 seed splits and
-  calls it approximate, and clarifies the 100M-token warm starts' numbers.
+  calls it approximate, clarifies the 100M-token warm starts' numbers, and says the eval sets informed
+  the design.
 
 
 ## [1.0.0] - 2026-11-19

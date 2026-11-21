@@ -14,6 +14,10 @@ Every release of ScaleLab, newest first. The format follows
   detected"; states how the power estimate was made; and its figures name the algorithms.
 - The README and the walkthrough say the same.
 
+- Write-up 2 gives sizes as non-embedding parameters (0.80M to 59.5M), heads its backtest by
+  what it found (close at m4, over-predicts m5), computes power over all 252 seed splits and
+  calls it approximate, and clarifies the 100M-token warm starts' numbers.
+
 
 ## [1.0.0] - 2026-11-19
 

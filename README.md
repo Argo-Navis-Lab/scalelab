@@ -20,9 +20,10 @@ so its results are about method at small scale, not claims about frontier models
   A100). At this scale RL's bottleneck is generation's kernel launches, not arithmetic.
 - [Write-up 2: how RL gains scale with model size, and how far one fit predicts](docs/writeups/02-scaling.md).
   One family of sigmoid curves fits 50 runs (five sizes, five seeds, GRPO and a DAPO-style
-  variant) to about 1.5 pp, but held-out sizes miss at the end: fitted on three sizes it
-  under-predicts the fourth by up to 2.3 pp, fitted on four it over-predicts the fifth by up
-  to 3.5 pp. DAPO beats GRPO at equal FLOPs; at equal samples no difference is detected.
+  variant) to about 1.5 pp. A backtest is close one size up (fitted on three sizes, it predicts
+  the fourth to 1.2-1.5 pp rms, its last grading up to 2.3 pp low) but over-predicts the fifth
+  by up to 3.5 pp. The DAPO-style variant beats GRPO at equal FLOPs; at equal samples no
+  difference is detected.
 
 ## The data
 

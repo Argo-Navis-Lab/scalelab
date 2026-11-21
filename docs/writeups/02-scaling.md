@@ -4,14 +4,14 @@ ScaleLab M4, 2026-11-17. Figures: `scalelab report scaling` (see Reproduce).
 
 ## In short
 
-- We ran 50 RL runs from scratch-trained models of 0.8M to 59M non-embedding parameters
+- We ran 50 RL runs from scratch-trained models of 0.80M to 59.5M non-embedding parameters
   (five sizes x five seeds x two algorithms, GRPO and DAPO), each on the same FLOP budget
   per size, and fitted **one family of sigmoid curves in compute** whose three parameters
   move linearly in log size. It fits all 50 runs to **1.4 pp (GRPO) and 1.6 pp (DAPO) rms**.
 - **The fit pins R where it was measured, not where it is going.** A seed bootstrap gives
   R at each size's last compute to within about 1 pp, but the ceiling A spans about 45 to
   55 pp from m3 up (GRPO m3-m5 roughly 26-82%).
-- **Backtest: both held-out sizes miss at the end.** Fitted on m1-m3, the family predicts
+- **Backtest: close at m4, over-predicts m5.** Fitted on m1-m3, the family predicts
   m4 from its starting accuracy alone to 1.5 pp (GRPO) and 1.2 pp (DAPO) rms over its
   trajectory, but under-predicts its last grading (GRPO 19.2% v 21.5% measured, DAPO 24.3%
   v 25.1%). Fitted on m1-m4, it over-predicts m5 by about 3 pp at the end of the run (GRPO
@@ -39,7 +39,8 @@ ScaleLab M4, 2026-11-17. Figures: `scalelab report scaling` (see Reproduce).
 - **Warm starts.** Each size is first trained by next-token prediction on 20M tokens of
   worked arithmetic solutions (one seed-0 warm start a size; every RL seed starts from it).
   We first trained them on 100M tokens, but that left m5 at 66% or more on multiplication
-  at every band up to 5 digits, with little room for RL; we dropped to 20M after seeing it.
+  at every band up to 5 digits (greedy pass@1 on the * problems of the same frozen eval sets;
+  90.2% and 66.5% at 4 and 5 digits), with little room for RL; we dropped to 20M after seeing it.
 - **Task.** Multiplication at 4 and 5 digits, chosen by a rule fixed before looking: the
   bands where the smallest model solves at least 5% and the largest at most 50%.
   **R** = greedy pass@1 over the two frozen eval sets pooled (653 problems). **R_0** = R
@@ -59,10 +60,13 @@ ScaleLab M4, 2026-11-17. Figures: `scalelab report scaling` (see Reproduce).
   training, and DAPO has no KL reference pass (at m5 a DAPO step costs 2.5e13 FLOPs, a
   GRPO step 8.5e13).
 - **Seeds.** A 10-seed study at m2 and m4 measured the seed spread of final R (sd 0.57 and
-  1.02 pp). Power: 20 times a size, the 10 seeds split at random into two arms of five,
+  1.02 pp). Power, approximate: for all 252 ways to split the 10 seeds into two arms of five,
   matched in order as `versus` matches seed s with seed s, and the seeds-and-problems
-  bootstrap run on the per-problem differences. Mean 95% half-width 1.67 pp (m2), 1.87 pp
-  (m4); with SE = half-width / 1.96, power at 3 pp = Phi(3 / SE - 1.96): 94% and 88%.
+  bootstrap run on the per-problem differences. Mean 95% half-width 1.69 pp (m2), 1.90 pp
+  (m4); with SE = half-width / 1.96, power at 3 pp = Phi(3 / SE - 1.96): 93% and 87%. This
+  assumes DAPO's seeds vary as GRPO's do and that seed s of two algorithms pairs no more
+  closely than two GRPO seeds. The real equal-samples intervals came out wider (half-widths
+  1.7-2.7 pp: power at 3 pp roughly 60-93%), so five seeds resolve about 3 pp at best.
 - **C** = the RL FLOPs a run has spent (sampling, log-probs, training), summed over steps.
   Gradings run at steps 0, 1, 2, 3, 6, 10, 18, 32, 56, 100 and every 100 after.
 
@@ -155,8 +159,8 @@ KL reference pass either. Generation is a small share of the FLOPs (15% of a GRP
 m5) but dominates the time at this scale: in these fp16 runs' own timings, 49% (m5) to 83%
 (m1) of a GRPO step and 71-86% of a DAPO step ([Write-up 1](01-cost-model.md) explains
 why). So equal FLOPs buys DAPO 2.2-3.4x the steps. In FLOP bookkeeping at m5, a GRPO step
-without its reference pass would cost 1.21x less, and the passes DAPO skips cover the
-remaining 2.8x; RLOO (no reference, no filtering) ran 1.21x GRPO's steps, as that predicts.
+without its reference pass would cost about 17% less (7.06e13 v 8.53e13 FLOPs), and the passes DAPO skips cover the
+remaining 2.8x; RLOO (no reference, no filtering) ran 1.21x GRPO's steps at every size, as that predicts.
 That splits what the counter charged; it is not an ablation. Read at equal samples (GRPO's
 ~1017 steps against DAPO's 1000; samples count every generated answer), no difference is
 detected at any size, though the intervals allow up to +3.3 pp. Clipping, KL, loss

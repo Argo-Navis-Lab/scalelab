@@ -1,4 +1,6 @@
-<img src="assets/scalelab-logo.png" width="512" alt="ScaleLab Logo"><br>
+<p align="center">
+  <img src="assets/scalelab-logo.png" width="512" alt="ScaleLab Logo">
+</p><br>
 
 [![CI](https://github.com/Argo-Navis-Lab/scalelab/actions/workflows/ci.yml/badge.svg)](https://github.com/Argo-Navis-Lab/scalelab/actions/workflows/ci.yml)
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Datasets-yellow)](https://huggingface.co/datasets/argo-navis-research-laboratory/scalelab-runs)<br>
